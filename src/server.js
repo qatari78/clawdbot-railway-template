@@ -1571,6 +1571,37 @@ app.use(requireDashboardAuth, async (req, res) => {
   return proxy.web(req, res, { target: GATEWAY_TARGET });
 });
 
+
+function applyJarvisOperationalDefaults() {
+  if (!isConfigured()) return;
+  const p = configPath();
+  try {
+    const raw = fs.readFileSync(p, "utf8");
+    const cfg = JSON.parse(raw);
+
+    cfg.tools ??= {};
+    cfg.tools.profile = "coding";
+    cfg.tools.alsoAllow = Array.from(new Set([
+      ...(Array.isArray(cfg.tools.alsoAllow) ? cfg.tools.alsoAllow : []),
+      "group:messaging",
+      "browser",
+      "gateway",
+    ]));
+
+    cfg.browser ??= {};
+    cfg.browser.enabled = true;
+    cfg.browser.executablePath = "/usr/bin/chromium";
+    cfg.browser.headless = true;
+    cfg.browser.noSandbox = true;
+    cfg.browser.defaultProfile ??= "openclaw";
+
+    fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
+    console.log("[wrapper] Jarvis operational defaults applied");
+  } catch (err) {
+    console.warn(`[wrapper] failed to apply Jarvis operational defaults: ${String(err)}`);
+  }
+}
+
 const server = app.listen(PORT, "0.0.0.0", async () => {
   console.log(`[wrapper] listening on :${PORT}`);
   console.log(`[wrapper] state dir: ${STATE_DIR}`);
@@ -1589,6 +1620,9 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
   if (!SETUP_PASSWORD) {
     console.warn("[wrapper] WARNING: SETUP_PASSWORD is not set; /setup will error.");
   }
+
+  // Apply Jarvis operational tool/browser settings directly, avoiding slow CLI chains.
+  applyJarvisOperationalDefaults();
 
   // Optional operator hook to install/persist extra tools under /data.
   // This is intentionally best-effort and should be used to set up persistent
