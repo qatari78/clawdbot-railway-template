@@ -98,9 +98,12 @@ try {
   );
   console.log(`[memory-bootstrap] search-test exit=${test.code}\n${test.output}`);
 
-  // Memory bootstrap must never prevent Jarvis from starting.
-  process.exit(0);
+  // Always hand off to the wrapper in-process. This makes startup safe whether
+  // Railway invokes this bootstrap directly or the normal server command.
+  console.log("[memory-bootstrap] starting wrapper");
+  await import("./server.js");
 } catch (err) {
   console.warn(`[memory-bootstrap] non-fatal error: ${String(err)}`);
-  process.exit(0);
+  console.log("[memory-bootstrap] starting wrapper after non-fatal error");
+  await import("./server.js");
 }
