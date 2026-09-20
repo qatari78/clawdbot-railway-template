@@ -1581,6 +1581,9 @@ function applyJarvisOperationalDefaults() {
 
     cfg.tools ??= {};
     cfg.tools.profile = "coding";
+    cfg.tools.loopDetection ??= {};
+    if (cfg.tools.loopDetection.enabled === undefined) cfg.tools.loopDetection.enabled = true;
+    if (cfg.tools.codeMode === undefined) cfg.tools.codeMode = "auto";
     cfg.tools.alsoAllow = Array.from(new Set([
       ...(Array.isArray(cfg.tools.alsoAllow) ? cfg.tools.alsoAllow : []),
       "group:messaging",
@@ -1594,6 +1597,49 @@ function applyJarvisOperationalDefaults() {
     cfg.browser.headless = true;
     cfg.browser.noSandbox = true;
     cfg.browser.defaultProfile ??= "openclaw";
+
+    // Keep autonomous learning reviewable until Salem explicitly promotes it to auto.
+    cfg.skills ??= {};
+    cfg.skills.workshop ??= {};
+    cfg.skills.workshop.autonomous ??= {};
+    if (cfg.skills.workshop.autonomous.mode === undefined) {
+      cfg.skills.workshop.autonomous.mode = "propose";
+    }
+
+    // Install a local high-priority recovery skill once. OpenClaw watches workspace
+    // skills, so future human edits are preserved and picked up automatically.
+    const stucklessDir = path.join(WORKSPACE_DIR, "skills", "stuckless");
+    const stucklessPath = path.join(stucklessDir, "SKILL.md");
+    if (!fs.existsSync(stucklessPath)) {
+      fs.mkdirSync(stucklessDir, { recursive: true });
+      const stucklessSkill = [
+        "---",
+        "name: stuckless",
+        "description: Bounded recovery protocol for repeated tool, browser, web, model, and multi-step task failures.",
+        "user-invocable: false",
+        "---",
+        "",
+        "# Stuckless recovery protocol",
+        "",
+        "Use this whenever a tool, browser action, web source, model call, or multi-step task fails, stalls, or repeats.",
+        "",
+        "1. Never repeat the same failing tool call with identical arguments more than twice.",
+        "2. After two equivalent failures, change the method rather than merely retrying.",
+        "3. Keep a hard budget of four attempts for one failure family. If no progress after four, stop the loop and report the blocker.",
+        "4. For research: prefer search/RSS or web fetch first; use browser automation when interaction or rendered content is required. If a source returns 401/403/JS blocking, switch to another reputable source instead of hammering it.",
+        "5. For browser trouble: inspect browser status and tabs, reuse a stable tab when possible, resnapshot after page changes, then try one clean tab. Captcha, MFA, login approval, camera, or microphone blockers require the owner.",
+        "6. For command/tool errors: read the exact error and inspect current state before changing anything. Change one relevant variable at a time and verify the result.",
+        "7. Before any gateway restart or action that may interrupt the current turn, write /data/workspace/recovery/active-task.md with the user goal, completed work, last error, and next action. Restart the gateway at most once for the same failure, then resume from the checkpoint.",
+        "8. Do not autonomously restart or redeploy the Railway service, delete/reset persistent state, delete databases or volumes, rotate secrets, or rewrite provider credentials. Those are supervisor/operator actions.",
+        "9. Do not claim a source or action succeeded if it failed. For multi-source research, distinguish successful sources from attempted/blocked sources.",
+        "10. When a non-obvious recovery reliably works and is reusable, send it through Skill Workshop as a proposed improvement. Do not create a recursive self-edit loop.",
+        "",
+        "Recovery priority: continue safely -> switch tool/path -> isolate the failing component -> checkpoint -> one bounded gateway restart if appropriate -> escalate.",
+        ""
+      ].join("\n");
+      fs.writeFileSync(stucklessPath, stucklessSkill, { encoding: "utf8", mode: 0o600 });
+      console.log("[wrapper] installed stuckless recovery skill");
+    }
 
     fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
     console.log("[wrapper] Jarvis operational defaults applied");
