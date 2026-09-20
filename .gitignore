@@ -13,3 +13,14 @@ npm-debug.log*
 
 # OS
 .DS_Store
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.jks
+*.keystore
+.openclaw/
+credentials/
