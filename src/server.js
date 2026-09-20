@@ -1669,6 +1669,20 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
       console.log("[wrapper] gateway ready");
     } catch (err) {
       console.error(`[wrapper] gateway failed to start at boot: ${String(err)}`);
+      // Railway can briefly overlap old/new containers on the same persistent volume.
+      // OpenClaw's gateway-owner lease may therefore outlive the old container for a few
+      // minutes. Retry automatically so Jarvis recovers without a manual restart.
+      const gatewayRetryTimer = setInterval(async () => {
+        try {
+          console.log("[wrapper] retrying gateway startup...");
+          await ensureGatewayRunning();
+          console.log("[wrapper] gateway ready after retry");
+          clearInterval(gatewayRetryTimer);
+        } catch (retryErr) {
+          console.warn(`[wrapper] gateway retry not ready yet: ${String(retryErr)}`);
+        }
+      }, 45_000);
+      gatewayRetryTimer.unref?.();
     }
   }
 });
