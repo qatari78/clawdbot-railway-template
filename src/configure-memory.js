@@ -51,22 +51,18 @@ try {
   cfg.models ??= {};
   cfg.models.mode ??= "merge";
   cfg.models.providers ??= {};
-  cfg.models.providers["openrouter-memory"] = {
+  delete cfg.models.providers["openrouter-memory"];
+  cfg.models.providers.openrouter = {
+    ...(cfg.models.providers.openrouter || {}),
     api: "openai-completions",
     baseUrl: "https://openrouter.ai/api/v1",
     apiKey: "openrouter:default",
-    models: [
-      {
-        id: "openai/text-embedding-3-small",
-        name: "OpenAI Text Embedding 3 Small",
-      },
-    ],
   };
 
   cfg.memory ??= {};
   cfg.memory.search ??= {};
   cfg.memory.search.enabled = true;
-  cfg.memory.search.provider = "openrouter-memory";
+  cfg.memory.search.provider = "openrouter";
   cfg.memory.search.model = "openai/text-embedding-3-small";
   cfg.memory.search.fallback = "none";
   cfg.memory.search.rememberAcrossConversations = true;
