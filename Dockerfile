@@ -33,6 +33,28 @@ RUN set -eux; \
     sed -i -E 's/"openclaw"[[:space:]]*:[[:space:]]*"workspace:[^"]+"/"openclaw": "*"/g' "$f"; \
   done
 
+# Compatibility patch for ordinary URL navigation:
+# If an agent accidentally supplies a dashboard selector together with a URL,
+# treat it as normal managed-browser navigation. Real dashboard opens never carry a URL.
+RUN node <<'NODE'
+const fs = require("fs");
+const p = "extensions/browser/src/browser-tool.ts";
+let s = fs.readFileSync(p, "utf8");
+const old = '      const dashboardName = readStringParam(params, "dashboard");\n      let browserDashboard: BrowserDashboardResponse | undefined;';
+const replacement = '      let dashboardName = readStringParam(params, "dashboard");\n' +
+  '      if (dashboardName && (params.targetUrl !== undefined || params.url !== undefined)) {\n' +
+  '        params = { ...params };\n' +
+  '        delete params.dashboard;\n' +
+  '        dashboardName = undefined;\n' +
+  '      }\n' +
+  '      let browserDashboard: BrowserDashboardResponse | undefined;';
+if (!s.includes(old)) {
+  throw new Error("browser dashboard compatibility patch target not found");
+}
+s = s.replace(old, replacement);
+fs.writeFileSync(p, s);
+NODE
+
 RUN pnpm install --no-frozen-lockfile
 RUN pnpm build
 ENV OPENCLAW_PREFER_PNPM=1
