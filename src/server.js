@@ -1427,6 +1427,9 @@ app.post(
 );
 
 function requireDashboardAuth(req, res, next) {
+  // Browsers often request /favicon.ico before the dashboard session exists.
+  // Returning 204 prevents that background request from triggering a native Basic-auth popup.
+  if (req.path === "/favicon.ico") return res.status(204).end();
   if (req.path === "/healthz" || req.path === "/setup/healthz") return next();
   if (req.path.startsWith("/hooks")) return next(); // allow OpenClaw webhook endpoints to bypass dashboard auth
   if (req.path === "/__login") return next();
