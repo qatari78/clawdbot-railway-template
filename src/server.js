@@ -43,6 +43,10 @@ const WORKSPACE_DIR =
 // Protect /setup with a user-provided password.
 const SETUP_PASSWORD = process.env.SETUP_PASSWORD?.trim();
 
+// Separate machine credential for automated backup export.
+// Human/admin access continues to use SETUP_PASSWORD.
+const BACKUP_EXPORT_TOKEN = process.env.BACKUP_EXPORT_TOKEN?.trim();
+
 // Gateway admin token (protects OpenClaw gateway + Control UI).
 // Must be stable across restarts. If not provided via env, persist it in the state dir.
 function resolveGatewayToken() {
@@ -326,7 +330,7 @@ async function probeGateway() {
 }
 
 // Public health endpoint (no auth) so Railway can probe without /setup.
-// Keep this free of secrets.
+// Deliberately expose only coarse health state; no paths, ports, errors, or config metadata.
 app.get("/healthz", async (_req, res) => {
   let gatewayReachable = false;
   if (isConfigured()) {
@@ -337,21 +341,7 @@ app.get("/healthz", async (_req, res) => {
     }
   }
 
-  res.json({
-    ok: true,
-    wrapper: {
-      configured: isConfigured(),
-      stateDir: STATE_DIR,
-      workspaceDir: WORKSPACE_DIR,
-    },
-    gateway: {
-      target: GATEWAY_TARGET,
-      reachable: gatewayReachable,
-      lastError: lastGatewayError,
-      lastExit: lastGatewayExit,
-      lastDoctorAt,
-    },
-  });
+  res.json({ ok: true, gatewayReachable });
 });
 
 app.get("/setup/app.js", requireSetupAuth, (_req, res) => {
@@ -1170,7 +1160,24 @@ app.post("/setup/api/reset", requireSetupAuth, async (_req, res) => {
   }
 });
 
-app.get("/setup/export", requireSetupAuth, async (_req, res) => {
+function requireExportAuth(req, res, next) {
+  // Preferred path for automation: a dedicated bearer token with backup-only scope.
+  const header = req.headers.authorization || "";
+  const [scheme, encoded] = header.split(" ");
+  if (
+    scheme === "Bearer" &&
+    encoded &&
+    BACKUP_EXPORT_TOKEN &&
+    safeEqual(encoded, BACKUP_EXPORT_TOKEN)
+  ) {
+    return next();
+  }
+
+  // Preserve existing human recovery access via SETUP_PASSWORD.
+  return requireSetupAuth(req, res, next);
+}
+
+app.get("/setup/export", requireExportAuth, async (_req, res) => {
   fs.mkdirSync(STATE_DIR, { recursive: true });
   fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
 
