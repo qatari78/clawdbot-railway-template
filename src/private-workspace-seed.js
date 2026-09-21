@@ -232,6 +232,10 @@ function applyJarvisMultiAgentScaffoldV1(workspaceDir) {
   }
 
   let configChanged = false;
+  if (cfg.agents.ownership === undefined) {
+    cfg.agents.ownership = "explicit";
+    configChanged = true;
+  }
   cfg.agents.entries.main.subagents ??= {};
   const existingMainAllow = Array.isArray(cfg.agents.entries.main.subagents.allowAgents)
     ? cfg.agents.entries.main.subagents.allowAgents
