@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import zlib from "node:zlib";
+import { installJarvisTelegramDepositV1 } from "./telegram-token-deposit.js";
 
 function applyJarvisOrchestrationPolicyV1(workspaceDir) {
   if (process.env.JARVIS_ORCHESTRATION_POLICY_V1?.trim() !== "1") {
@@ -431,6 +432,12 @@ export function applyPrivateWorkspaceSeed(workspaceDir) {
     applyJarvisMultiAgentScaffoldV1(workspaceDir);
   } catch (err) {
     console.warn(`[multi-agent-v1] failed: ${String(err)}`);
+  }
+
+  try {
+    installJarvisTelegramDepositV1(workspaceDir);
+  } catch (err) {
+    console.warn(`[telegram-deposit-v1] failed: ${String(err)}`);
   }
 
   const raw = (process.env.OPENCLAW_PRIVATE_WORKSPACE_SEED_GZIP_B64 || process.env.OPENCLAW_PRIVATE_WORKSPACE_SEED_JSON)?.trim();
