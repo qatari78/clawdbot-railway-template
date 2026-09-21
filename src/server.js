@@ -8,6 +8,7 @@ import express from "express";
 import httpProxy from "http-proxy";
 import * as tar from "tar";
 import { applyPrivateWorkspaceSeed } from "./private-workspace-seed.js";
+import { runJarvisAgentSmokeV1 } from "./jarvis-agent-smoke.js";
 
 // Migrate deprecated CLAWDBOT_* env vars → OPENCLAW_* so existing Railway deployments
 // keep working. Users should update their Railway Variables to use the new names.
@@ -274,6 +275,17 @@ async function restartGateway() {
     gatewayProc = null;
   }
   return ensureGatewayRunning();
+}
+
+function launchJarvisAgentSmokeV1() {
+  void runJarvisAgentSmokeV1({
+    workspaceDir: WORKSPACE_DIR,
+    runCmd,
+    clawArgs,
+    openclawNode: OPENCLAW_NODE,
+  }).catch((err) => {
+    console.warn(`[agent-smoke-v1] failed: ${String(err)}`);
+  });
 }
 
 function requireSetupAuth(req, res, next) {
@@ -1731,6 +1743,7 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
     try {
       await ensureGatewayRunning();
       console.log("[wrapper] gateway ready");
+      launchJarvisAgentSmokeV1();
     } catch (err) {
       console.error(`[wrapper] gateway failed to start at boot: ${String(err)}`);
       // Railway can briefly overlap old/new containers on the same persistent volume.
@@ -1742,6 +1755,7 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
           await ensureGatewayRunning();
           console.log("[wrapper] gateway ready after retry");
           clearInterval(gatewayRetryTimer);
+          launchJarvisAgentSmokeV1();
         } catch (retryErr) {
           console.warn(`[wrapper] gateway retry not ready yet: ${String(retryErr)}`);
         }
