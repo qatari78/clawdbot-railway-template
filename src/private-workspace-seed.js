@@ -242,6 +242,11 @@ function applyJarvisMultiAgentScaffoldV1(workspaceDir) {
     cfg.agents.defaults.systemAgent.agentId = "main";
     configChanged = true;
   }
+  cfg.agents.defaults.heartbeat ??= {};
+  if (cfg.agents.defaults.heartbeat.every !== "0m") {
+    cfg.agents.defaults.heartbeat.every = "0m";
+    configChanged = true;
+  }
   cfg.agents.entries.main.subagents ??= {};
   const existingMainAllow = Array.isArray(cfg.agents.entries.main.subagents.allowAgents)
     ? cfg.agents.entries.main.subagents.allowAgents
