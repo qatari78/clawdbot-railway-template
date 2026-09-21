@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import zlib from "node:zlib";
-import { installJarvisTelegramDepositV1 } from "./telegram-token-deposit.js";
+import { installJarvisTelegramDepositV1 } from "./telegram-token-deposit.js";\nimport { installJarvisRoomsV1 } from "./jarvis-rooms.js";
 
 function applyJarvisOrchestrationPolicyV1(workspaceDir) {
   if (process.env.JARVIS_ORCHESTRATION_POLICY_V1?.trim() !== "1") {
