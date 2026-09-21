@@ -1,13 +1,18 @@
 import fs from "node:fs";
 import path from "node:path";
+import zlib from "node:zlib";
 
 export function applyPrivateWorkspaceSeed(workspaceDir) {
-  const raw = process.env.OPENCLAW_PRIVATE_WORKSPACE_SEED_JSON?.trim();
+  const raw = (process.env.OPENCLAW_PRIVATE_WORKSPACE_SEED_GZIP_B64 || process.env.OPENCLAW_PRIVATE_WORKSPACE_SEED_JSON)?.trim();
   if (!raw) return { applied: false, reason: "no-seed" };
 
   let spec;
   try {
-    spec = JSON.parse(Buffer.from(raw, "base64").toString("utf8"));
+    const bytes = Buffer.from(raw, "base64");
+    const decoded = process.env.OPENCLAW_PRIVATE_WORKSPACE_SEED_GZIP_B64
+      ? zlib.gunzipSync(bytes).toString("utf8")
+      : bytes.toString("utf8");
+    spec = JSON.parse(decoded);
   } catch (err) {
     console.warn("[workspace-seed] invalid seed payload");
     return { applied: false, reason: "invalid-seed" };
