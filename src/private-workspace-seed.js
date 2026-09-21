@@ -5,6 +5,7 @@ import path from "node:path";
 import zlib from "node:zlib";
 import { installJarvisTelegramDepositV1 } from "./telegram-token-deposit.js";
 import { installJarvisRoomsV1 } from "./jarvis-rooms.js";
+import { installJarvisCostIntelligenceV1 } from "./jarvis-cost-intelligence.js";
 
 function applyJarvisOrchestrationPolicyV1(workspaceDir) {
   if (process.env.JARVIS_ORCHESTRATION_POLICY_V1?.trim() !== "1") {
@@ -423,6 +424,12 @@ function applyJarvisMultiAgentScaffoldV1(workspaceDir) {
 }
 
 export function applyPrivateWorkspaceSeed(workspaceDir) {
+  try {
+    installJarvisCostIntelligenceV1(workspaceDir);
+  } catch (err) {
+    console.warn(`[cost-intelligence-v1] failed: ${String(err)}`);
+  }
+
   try {
     installJarvisRoomsV1(workspaceDir);
   } catch (err) {
