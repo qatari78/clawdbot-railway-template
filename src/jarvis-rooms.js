@@ -1,0 +1,173 @@
+import fs from "node:fs";
+import path from "node:path";
+
+const MANAGED_MARKER = "<!-- managed-by: jarvis-rooms-v1 -->";
+
+function backupOnce(src, backupDir, name) {
+  if (!fs.existsSync(src)) return;
+  fs.mkdirSync(backupDir, { recursive: true, mode: 0o700 });
+  const dst = path.join(backupDir, name);
+  if (!fs.existsSync(dst)) fs.copyFileSync(src, dst);
+}
+
+function writeManagedFile(filePath, body, backupDir, backupName) {
+  const normalized = body.trimEnd() + "\n";
+  if (fs.existsSync(filePath)) {
+    const existing = fs.readFileSync(filePath, "utf8");
+    if (existing === normalized) return false;
+    backupOnce(filePath, backupDir, backupName);
+  } else {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  }
+  fs.writeFileSync(filePath, normalized, { encoding: "utf8", mode: 0o600 });
+  return true;
+}
+
+export function installJarvisRoomsV1(workspaceDir) {
+  if (process.env.JARVIS_ROOMS_V1?.trim() !== "1") {
+    return { applied: false, reason: "disabled" };
+  }
+
+  const backupDir = path.join(
+    workspaceDir,
+    "memory",
+    ".seed-backups",
+    "2026-09-22-jarvis-rooms-v1",
+  );
+  const skillPath = path.join(workspaceDir, "skills", "jarvis-rooms", "SKILL.md");
+  const roomsReadmePath = path.join(workspaceDir, "rooms", "README.md");
+
+  const skill = `---
+name: jarvis-rooms
+description: Run Jarvis Forum, Counsel, and centralized research using the installed stable backend seats.
+user-invocable: false
+---
+
+# Jarvis Rooms v1
+
+<!-- managed-by: jarvis-rooms-v1 -->
+
+## Default mode
+
+Jarvis stays direct-first. Normal questions and deterministic tool work are handled by Jarvis without creating an agent workflow merely because a task is difficult.
+
+Long research or room work should be delegated to backend sessions so the main Jarvis conversation remains available while specialist work proceeds.
+
+## Stable backend seats
+
+Use only the already-installed stable agent IDs:
+- Forum advisers: \`forum-01\`, \`forum-02\`, \`forum-03\`
+- Counsel advisers: \`counsel-01\`, \`counsel-02\`, \`counsel-03\`
+- Research workers: \`research-01\`, \`research-02\`
+
+Model/provider assignments are replaceable occupants. Do not encode a provider/model name into room logic.
+
+Use the runtime's supported session/delegation tools and their current schemas. Do not invent shell calls or unsupported session arguments.
+
+## Research routing
+
+Centralize evidence gathering so advisers do not each browse independently.
+
+- Quick: use \`research-01\`.
+- Standard: use \`research-01\` and \`research-02\` independently on the same scoped research question.
+- Deep: use both researchers, then issue only targeted gap/contradiction follow-up when the first evidence packets show a material need.
+
+Researchers return evidence, dates, links/citations, contradictions, and uncertainty. They do not make the final recommendation, perform operational actions, modify configuration, or spawn children.
+
+## Shared case packet
+
+For a room run, Jarvis creates one scoped dossier containing:
+1. the owner's question and requested decision/output;
+2. relevant user-supplied context;
+3. constraints and exclusions;
+4. the research evidence packet, if research is needed;
+5. unresolved questions, contradictions, and uncertainty;
+6. a run identifier and timestamp.
+
+The canonical audit copy may be stored under \`/data/workspace/rooms/cases/\`. Do not store API keys, tokens, passwords, or other secrets there. Do not create a second personal-memory profile there.
+
+Because backend agent workspaces are isolated, do not assume a seat can read the main workspace packet path. Send the scoped dossier content through the supported session message/spawn mechanism; the filesystem copy is for audit/recovery.
+
+## Forum
+
+Forum runs only when the owner explicitly invokes Forum or directly addresses a Forum adviser.
+
+- Choose the minimum relevant Forum seats.
+- Give participating seats the same scoped case/evidence packet.
+- One independent adviser pass is the default.
+- Run a second adviser round only for a material contradiction, missing issue, or explicit owner request.
+- Jarvis may synthesize Forum when the owner asks for a Forum answer.
+- If the owner directly addresses a specific adviser, that adviser answers as itself.
+- Forum may recommend Counsel, but Forum/Jarvis must never invoke Counsel automatically.
+
+Forum advisers do not browse independently, spawn children, perform operational execution, or create parallel personal memory.
+
+## Counsel
+
+Counsel requires explicit owner authorization. A recommendation to use Counsel is not authorization.
+
+- Inherit the existing structured dossier instead of restarting from zero.
+- Request only delta/deeper research that is materially needed.
+- Obtain independent views from the minimum relevant Counsel seats.
+- \`counsel-01\` is the current final-synthesizer seat.
+- Final synthesis must preserve material disagreements and evidence uncertainty rather than manufacturing consensus.
+- Follow-up questions remain within the Counsel context until the owner exits Counsel or explicitly addresses Jarvis.
+
+Counsel advisers do not browse independently, recursively spawn agents, perform operational execution, or create parallel personal memory.
+
+## Cost and quality guardrails
+
+Do not invent numeric spend thresholds.
+- Avoid duplicate inference and duplicate browsing first.
+- Preserve Jarvis intelligence rather than silently downgrading the primary model.
+- Any material spend-limit increase requires owner approval.
+- Any routing change that materially reduces quality requires owner approval.
+- New model/provider assignments belong in replaceable seat configuration, not in this skill.
+
+## Operational delegation
+
+Research/adviser seats are not operator agents. Real-world account actions, deployments, configuration changes, social posting, finance operations, or similar execution go only to dedicated operator agents with explicit permissions once those agents exist.
+
+## Failure behavior
+
+Use the existing bounded recovery policy. If a worker fails repeatedly, change method or report the blocker; do not recursively spawn a herd of replacement agents.
+`;
+
+  const roomsReadme = `# Jarvis room workspace
+
+<!-- managed-by: jarvis-rooms-v1 -->
+
+This directory is for scoped Forum/Counsel case dossiers, research evidence packets, and room-run recovery/audit artifacts.
+
+Recommended future layout:
+
+\`rooms/cases/<run-id>/case.md\`
+\`rooms/cases/<run-id>/evidence.md\`
+\`rooms/cases/<run-id>/forum.md\`
+\`rooms/cases/<run-id>/counsel.md\`
+
+Rules:
+- No API keys, bot tokens, passwords, provider credentials, or other secrets.
+- No duplicate personal-memory profile.
+- Keep only task-scoped context needed for the room run.
+- Backend seats may have isolated workspaces, so pass the scoped dossier through supported session messaging; do not rely on cross-workspace file access.
+`;
+
+  const changedSkill = writeManagedFile(skillPath, skill, backupDir, "SKILL.md.pre-v1");
+  const changedReadme = writeManagedFile(roomsReadmePath, roomsReadme, backupDir, "rooms-README.md.pre-v1");
+
+  const verifySkill = fs.readFileSync(skillPath, "utf8");
+  const verifyReadme = fs.readFileSync(roomsReadmePath, "utf8");
+  if (!verifySkill.includes(MANAGED_MARKER) || !verifySkill.includes("# Jarvis Rooms v1")) {
+    throw new Error("jarvis-rooms skill verification failed");
+  }
+  if (!verifyReadme.includes(MANAGED_MARKER)) {
+    throw new Error("jarvis-rooms README verification failed");
+  }
+
+  try { fs.chmodSync(skillPath, 0o600); } catch {}
+  try { fs.chmodSync(roomsReadmePath, 0o600); } catch {}
+
+  console.log("[jarvis-rooms-v1] installed and verified");
+  return { applied: true, changed: changedSkill || changedReadme, skillPath, roomsReadmePath, backupDir };
+}
