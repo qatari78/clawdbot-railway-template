@@ -7,6 +7,7 @@ import path from "node:path";
 import express from "express";
 import httpProxy from "http-proxy";
 import * as tar from "tar";
+import { applyPrivateWorkspaceSeed } from "./private-workspace-seed.js";
 
 // Migrate deprecated CLAWDBOT_* env vars → OPENCLAW_* so existing Railway deployments
 // keep working. Users should update their Railway Variables to use the new names.
@@ -1680,6 +1681,9 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
   if (!SETUP_PASSWORD) {
     console.warn("[wrapper] WARNING: SETUP_PASSWORD is not set; /setup will error.");
   }
+
+  // Apply private workspace seed from Railway-only payload, if present.
+  applyPrivateWorkspaceSeed(WORKSPACE_DIR);
 
   // Apply Jarvis operational tool/browser settings directly, avoiding slow CLI chains.
   applyJarvisOperationalDefaults();
