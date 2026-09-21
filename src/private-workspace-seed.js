@@ -319,7 +319,7 @@ function applyJarvisMultiAgentScaffoldV1(workspaceDir) {
 
     const validation = childProcess.spawnSync(
       process.execPath,
-      ["/openclaw/dist/entry.js", "config", "get", "agents.entries"],
+      ["/openclaw/dist/entry.js", "config", "validate", "--json"],
       {
         env: {
           ...process.env,
@@ -331,6 +331,14 @@ function applyJarvisMultiAgentScaffoldV1(workspaceDir) {
       },
     );
     if (validation.status !== 0) {
+      let diagnostic = [validation.stdout || "", validation.stderr || ""].join("\n").trim();
+      const secrets = [
+        cfg.channels?.telegram?.botToken,
+        cfg.gateway?.auth?.token,
+        cfg.gateway?.remote?.token,
+      ].filter((value) => typeof value === "string" && value.length > 0);
+      for (const secret of secrets) diagnostic = diagnostic.split(secret).join("[REDACTED]");
+      console.warn("[multi-agent-v1] candidate validation failed: " + diagnostic.slice(0, 3000));
       fs.copyFileSync(configBackupPath, configPath);
       throw new Error("OpenClaw rejected multi-agent scaffold config; restored pre-scaffold config");
     }
