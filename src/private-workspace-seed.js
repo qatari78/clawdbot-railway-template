@@ -132,24 +132,33 @@ function applyJarvisWhatsAppRoomsV1(workspaceDir) {
 
   const root = cfg.channels.whatsapp;
   const target = root.accounts?.default ?? root;
-
-  target.groupPolicy = "allowlist";
-  target.groups ??= {};
-  target.groups["*"] = {
-    ...(target.groups["*"] ?? {}),
-    requireMention: false,
-  };
+  const explicitOwner = process.env.JARVIS_WHATSAPP_OWNER_E164?.trim();
 
   const ownerAllow =
-    (Array.isArray(target.allowFrom) && target.allowFrom.length > 0
-      ? target.allowFrom
-      : Array.isArray(root.allowFrom) && root.allowFrom.length > 0
-        ? root.allowFrom
-        : null);
+    (explicitOwner
+      ? [explicitOwner]
+      : Array.isArray(target.allowFrom) && target.allowFrom.length > 0
+        ? target.allowFrom
+        : Array.isArray(root.allowFrom) && root.allowFrom.length > 0
+          ? root.allowFrom
+          : null);
 
-  if (ownerAllow) {
-    target.groupAllowFrom = Array.from(new Set(ownerAllow));
-  }
+  const enableScope = (scope) => {
+    scope.groupPolicy = "allowlist";
+    scope.groups ??= {};
+    scope.groups["*"] = {
+      ...(scope.groups["*"] ?? {}),
+      requireMention: false,
+    };
+    if (ownerAllow) {
+      scope.groupAllowFrom = Array.from(new Set(ownerAllow));
+    }
+  };
+
+  // Set both the channel root and the effective default account. OpenClaw's
+  // WhatsApp runtime resolves policy across both scopes in multi-account configs.
+  enableScope(root);
+  if (target !== root) enableScope(target);
 
   fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2) + "\n", {
     encoding: "utf8",
