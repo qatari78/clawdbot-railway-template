@@ -188,8 +188,22 @@ function permissionTemplate(agentClass, requestedTools) {
   if (agentClass === "adviser") {
     if (requestedTools.length) fail("Adviser class does not accept custom tools");
     return {
-      allow: ["sessions_send", "session_status"],
-      deny: [...CORE_DENY, "browser", "web_search", "web_fetch"],
+      allow: ["message", "sessions_list", "sessions_history", "ask_user", "memory_search", "memory_get"],
+      deny: [
+        "read",
+        "write",
+        "edit",
+        "apply_patch",
+        "exec",
+        "process",
+        "gateway",
+        "cron",
+        "sessions_spawn",
+        "sessions_search",
+        "browser",
+        "web_search",
+        "web_fetch",
+      ],
     };
   }
   if (agentClass === "research") {
