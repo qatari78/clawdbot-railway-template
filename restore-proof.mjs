@@ -1,7 +1,6 @@
 // Isolated, non-destructive restore verifier.
 import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
 import { gunzipSync } from "node:zlib";
-import http from "node:http";
 
 const required = [".openclaw/openclaw.json", "workspace/AGENTS.md"];
 const bucket = process.env.BUCKET;
@@ -116,26 +115,11 @@ async function run() {
   };
 }
 
-let result;
-try {
-  result = await run();
-  console.log("RESTORE_PROOF_OK " + JSON.stringify(result));
-} catch {
-  result = { ok: false, error: "restore-proof-failed" };
-  console.error("RESTORE_PROOF_FAILED");
-}
-
-const port = Number.parseInt(process.env.PORT || "3000", 10);
-const server = http.createServer((req, res) => {
-  const pathname = new URL(req.url || "/", "http://localhost").pathname;
-  if (pathname !== "/proof" && pathname !== "/healthz") {
-    res.writeHead(404, { "content-type": "text/plain" });
-    res.end("not found");
-    return;
-  }
-  res.writeHead(result.ok ? 200 : 500, { "content-type": "application/json" });
-  res.end(JSON.stringify(result));
-});
-server.listen(port, "0.0.0.0", () => {
-  console.log(`RESTORE_PROOF_HTTP_READY port=${port}`);
-});
+run()
+  .then((result) => {
+    console.log("RESTORE_PROOF_OK " + JSON.stringify(result));
+  })
+  .catch((err) => {
+    console.error("RESTORE_PROOF_FAILED " + String(err?.message || err));
+    process.exit(1);
+  });
