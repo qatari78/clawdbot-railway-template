@@ -94,25 +94,44 @@ function inspectTar(gzipData) {
 async function run() {
   const date = new Date().toISOString().split("T")[0];
   const key = process.env.BACKUP_KEY || `openclaw-state-${date}.tar.gz`;
-  console.log(`[${new Date().toISOString()}] Restore proof started for ${key}`);
 
   const obj = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
   const bytes = await bodyToBytes(obj.Body);
 
   if (bytes.byteLength === 0) throw new Error("Downloaded backup object is empty");
   if (typeof obj.ContentLength === "number" && obj.ContentLength !== bytes.byteLength) {
-    throw new Error(
-      `S3 length mismatch: metadata=${obj.ContentLength} downloaded=${bytes.byteLength}`,
-    );
+    throw new Error("S3 object length does not match downloaded bytes");
   }
 
-  const result = inspectTar(bytes);
-  console.log(
-    `RESTORE_PROOF_OK key=${key} bytes=${bytes.byteLength} entries=${result.entries} configBytes=${result.configBytes} agentsBytes=${result.agentsBytes}`,
-  );
+  const inspected = inspectTar(bytes);
+  return {
+    ok: true,
+    key,
+    bytes: bytes.byteLength,
+    entries: inspected.entries,
+    configBytes: inspected.configBytes,
+    agentsBytes: inspected.agentsBytes,
+  };
 }
 
-run().catch((err) => {
-  console.error(`RESTORE_PROOF_FAILED ${err?.stack || err}`);
-  process.exit(1);
+let result;
+try {
+  result = await run();
+  console.log("RESTORE_PROOF_OK " + JSON.stringify(result));
+} catch {
+  result = { ok: false, error: "restore-proof-failed" };
+  console.error("RESTORE_PROOF_FAILED");
+}
+
+const port = Number.parseInt(process.env.PORT || "3000", 10);
+const server = Bun.serve({
+  port,
+  fetch(req) {
+    const pathname = new URL(req.url).pathname;
+    if (pathname !== "/proof" && pathname !== "/healthz") {
+      return new Response("not found", { status: 404 });
+    }
+    return Response.json(result, { status: result.ok ? 200 : 500 });
+  },
 });
+console.log(`RESTORE_PROOF_HTTP_READY port=${server.port}`);
