@@ -1,20 +1,11 @@
 {
-  "name": "clawdbot-railway-template",
+  "name": "openclaw-restore-proof",
   "private": true,
   "type": "module",
-  "engines": {
-    "node": ">=22"
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.0.0"
   },
   "scripts": {
-    "dev": "node src/server.js",
-    "start": "node src/server.js",
-    "lint": "set -e; for f in src/*.js; do node --check \"$f\"; done",
-    "test": "node --test",
-    "smoke": "node scripts/smoke.js"
-  },
-  "dependencies": {
-    "express": "^5.1.0",
-    "http-proxy": "^1.18.1",
-    "tar": "^7.5.4"
+    "start": "node restore-proof.mjs"
   }
 }
