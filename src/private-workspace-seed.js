@@ -209,6 +209,35 @@ function applyJarvisWhatsAppRoomsV1(workspaceDir) {
     throw new Error("duplicate Jarvis WhatsApp Rooms v1 markers found");
   }
 
+  // Human-facing room rendering v2. Keep v1 transport/routing intact, but
+  // add a stronger presentation contract for WhatsApp room turns.
+  const renderingMarker = "## Jarvis WhatsApp Room Rendering v2";
+  const renderingPolicy = `
+## Jarvis WhatsApp Room Rendering v2
+
+- For a substantive multi-seat Forum or Counsel run, collect and lock all first-round adviser outputs before publishing any adviser voice. Message order must never leak an earlier answer to advisers who are still thinking.
+- On WhatsApp, do not concatenate several model voices into one giant Jarvis bubble. After all required adviser outputs are locked, publish each exposed speaker as a separate outbound WhatsApp message to the same current conversation target.
+- Use compact human-facing headers without square brackets. Format the first line in WhatsApp bold, using the stable seat plus the current configured model/display alias, for example: *COUNSEL 1 · CLAUDE FABLE 5.1*, *COUNSEL 2 · GROK 4.7*, *COUNSEL 3 · GPT-5.6 SOL*. Forum uses the same pattern.
+- Do not hard-code a provider/model into backend room logic. If a seat's configured model changes, update only the human-facing model/display alias shown in the header.
+- A peer-review message, when one exists, is its own WhatsApp message with a compact header such as *COUNSEL 2 · RESPONSE TO COUNSEL 3*.
+- Final synthesis is always a separate WhatsApp message with a header such as *COUNSEL · FINAL SYNTHESIS — CLAUDE FABLE 5.1*.
+- Use the supported message tool to send these separate bubbles only after the relevant outputs are locked. When tool-sent bubbles already contain the complete response, use NO_REPLY (or the runtime-equivalent suppression) for the wrapper response so the same content is not duplicated.
+- If the current WhatsApp target cannot be resolved safely, do not guess a recipient. Fall back to the normal single response for that turn and report the rendering limitation.
+- The single linked WhatsApp identity remains Jarvis. Separate bubbles are presentation only; backend advisers are not separate WhatsApp accounts.
+`.trim();
+
+  let renderingAgents = fs.readFileSync(agentsPath, "utf8");
+  const renderingCount = (renderingAgents.match(/## Jarvis WhatsApp Room Rendering v2/g) || []).length;
+  if (renderingCount === 0) {
+    fs.writeFileSync(
+      agentsPath,
+      renderingAgents.trimEnd() + "\n\n" + renderingPolicy + "\n",
+      { encoding: "utf8", mode: 0o600 },
+    );
+  } else if (renderingCount > 1) {
+    throw new Error("duplicate Jarvis WhatsApp Room Rendering v2 markers found");
+  }
+
   console.log("[whatsapp-rooms-v1] group transport enabled and room routing policy verified");
   return { applied: true, backupDir, ownerAllowConfigured: Boolean(ownerAllow) };
 }
