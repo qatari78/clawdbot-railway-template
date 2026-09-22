@@ -1688,6 +1688,30 @@ function applyJarvisOperationalDefaults() {
       ]));
     }
 
+    // One-line, non-secret policy diagnostic for the v2026.3.8 tool resolver.
+    // Safe to keep: it reports only profile/allow/alsoAllow/deny names.
+    try {
+      const ids = ["main", "research-01", "research-02", ...adviserIds];
+      const entries = Object.fromEntries(ids.map((id) => {
+        const t = cfg.agents.entries?.[id]?.tools ?? {};
+        return [id, {
+          profile: t.profile ?? null,
+          allow: Array.isArray(t.allow) ? t.allow : null,
+          alsoAllow: Array.isArray(t.alsoAllow) ? t.alsoAllow : null,
+          deny: Array.isArray(t.deny) ? t.deny : null,
+        }];
+      }));
+      console.log("[tool-policy-diag-v1] " + JSON.stringify({
+        global: {
+          profile: cfg.tools.profile ?? null,
+          allow: Array.isArray(cfg.tools.allow) ? cfg.tools.allow : null,
+          alsoAllow: Array.isArray(cfg.tools.alsoAllow) ? cfg.tools.alsoAllow : null,
+          deny: Array.isArray(cfg.tools.deny) ? cfg.tools.deny : null,
+        },
+        entries,
+      }));
+    } catch {}
+
     // Dedicated Jarvis WhatsApp front door: keep first-run access conservative.
     // Unknown DMs must pair. Groups remain disabled unless the explicit
     // Jarvis WhatsApp Rooms feature is enabled.
