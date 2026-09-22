@@ -95,6 +95,116 @@ function applyJarvisOrchestrationPolicyV1(workspaceDir) {
 }
 
 
+function applyJarvisWhatsAppRoomsV1(workspaceDir) {
+  if (process.env.JARVIS_WHATSAPP_ROOMS_V1?.trim() !== "1") {
+    return { applied: false, reason: "disabled" };
+  }
+
+  const stateDir =
+    process.env.OPENCLAW_STATE_DIR?.trim() ||
+    process.env.CLAWDBOT_STATE_DIR?.trim() ||
+    path.join(os.homedir(), ".openclaw");
+  const configPath =
+    process.env.OPENCLAW_CONFIG_PATH?.trim() ||
+    path.join(stateDir, "openclaw.json");
+  const agentsPath = path.join(workspaceDir, "AGENTS.md");
+  const backupDir = path.join(
+    workspaceDir,
+    "memory",
+    ".seed-backups",
+    "2026-09-22-whatsapp-rooms-v1",
+  );
+
+  if (!fs.existsSync(configPath) || !fs.existsSync(agentsPath)) {
+    console.warn("[whatsapp-rooms-v1] config or AGENTS.md missing; skipping");
+    return { applied: false, reason: "missing-files" };
+  }
+
+  fs.mkdirSync(backupDir, { recursive: true, mode: 0o700 });
+  const configBackupPath = path.join(backupDir, "openclaw.json.pre-whatsapp-rooms");
+  const agentsBackupPath = path.join(backupDir, "AGENTS.md.pre-whatsapp-rooms");
+  if (!fs.existsSync(configBackupPath)) fs.copyFileSync(configPath, configBackupPath);
+  if (!fs.existsSync(agentsBackupPath)) fs.copyFileSync(agentsPath, agentsBackupPath);
+
+  const cfg = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  cfg.channels ??= {};
+  cfg.channels.whatsapp ??= {};
+
+  const root = cfg.channels.whatsapp;
+  const target = root.accounts?.default ?? root;
+
+  target.groupPolicy = "allowlist";
+  target.groups ??= {};
+  target.groups["*"] = {
+    ...(target.groups["*"] ?? {}),
+    requireMention: false,
+  };
+
+  const ownerAllow =
+    (Array.isArray(target.allowFrom) && target.allowFrom.length > 0
+      ? target.allowFrom
+      : Array.isArray(root.allowFrom) && root.allowFrom.length > 0
+        ? root.allowFrom
+        : null);
+
+  if (ownerAllow) {
+    target.groupAllowFrom = Array.from(new Set(ownerAllow));
+  }
+
+  fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2) + "\n", {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+
+  const validation = childProcess.spawnSync(
+    process.execPath,
+    ["/openclaw/dist/entry.js", "config", "validate", "--json"],
+    {
+      env: {
+        ...process.env,
+        OPENCLAW_STATE_DIR: stateDir,
+        OPENCLAW_CONFIG_PATH: configPath,
+      },
+      encoding: "utf8",
+      timeout: 30_000,
+    },
+  );
+  if (validation.status !== 0) {
+    fs.copyFileSync(configBackupPath, configPath);
+    throw new Error("OpenClaw rejected WhatsApp room configuration; restored previous config");
+  }
+
+  const marker = "## Jarvis WhatsApp Rooms v1";
+  const policy = `
+## Jarvis WhatsApp Rooms v1
+
+- WhatsApp DM with the owner is the Jarvis cockpit. Explicit requests such as "Forum: ...", "ask Forum ...", "Counsel: ...", or "Jarvis, Counsel. Go." invoke the corresponding internal room and return the result to the DM.
+- A WhatsApp group whose title/metadata identifies it as Forum is a persistent Forum surface. Owner messages in that group are Forum turns by default; no repeated "Forum" prefix is required.
+- A WhatsApp group whose title/metadata identifies it as Counsel is a persistent Counsel surface. Owner messages in that group are Counsel turns by default and count as explicit owner invocation of Counsel.
+- The single linked WhatsApp identity remains Jarvis. Do not impersonate multiple WhatsApp accounts or claim that backend advisers are separate WhatsApp participants.
+- When exposing individual room voices, label them clearly in the message body: [JARVIS], [FORUM 1 — CLAUDE SONNET 5], [FORUM 2 — GROK 4.7], [FORUM 3 — GEMINI 3.8 FLASH], [COUNSEL 1 — CLAUDE FABLE 5.1], [COUNSEL 2 — GROK 4.7], [COUNSEL 3 — GPT-5.6 SOL].
+- If the owner addresses a specific adviser/model, route to that seat and return that seat's own view. If the owner asks everyone, obtain independent room views before synthesis.
+- Forum can recommend Counsel but cannot invoke it. Only an owner message in the Counsel group or an explicit owner Counsel command authorizes Counsel.
+- Keep WhatsApp DM, Forum group, and Counsel group as separate conversation sessions. Do not merge their transient chat histories.
+`.trim();
+
+  let agents = fs.readFileSync(agentsPath, "utf8");
+  const count = (agents.match(/## Jarvis WhatsApp Rooms v1/g) || []).length;
+  if (count === 0) {
+    fs.writeFileSync(
+      agentsPath,
+      agents.trimEnd() + "\n\n" + policy + "\n",
+      { encoding: "utf8", mode: 0o600 },
+    );
+  } else if (count > 1) {
+    throw new Error("duplicate Jarvis WhatsApp Rooms v1 markers found");
+  }
+
+  console.log("[whatsapp-rooms-v1] group transport enabled and room routing policy verified");
+  return { applied: true, backupDir, ownerAllowConfigured: Boolean(ownerAllow) };
+}
+
+
 function applyJarvisMultiAgentScaffoldV1(workspaceDir) {
   if (process.env.JARVIS_MULTI_AGENT_SCAFFOLD_V1?.trim() !== "1") {
     return { applied: false, reason: "disabled" };
@@ -140,14 +250,14 @@ function applyJarvisMultiAgentScaffoldV1(workspaceDir) {
 
   const agentRoot = process.env.JARVIS_AGENT_WORKSPACES_DIR?.trim() || "/data/agent-workspaces";
   const seats = [
-    { id: "forum-01", label: "Forum 1", role: "forum" },
-    { id: "forum-02", label: "Forum 2", role: "forum" },
-    { id: "forum-03", label: "Forum 3", role: "forum" },
-    { id: "counsel-01", label: "Counsel 1", role: "counsel" },
-    { id: "counsel-02", label: "Counsel 2", role: "counsel" },
-    { id: "counsel-03", label: "Counsel 3", role: "counsel" },
-    { id: "research-01", label: "Research 1", role: "research" },
-    { id: "research-02", label: "Research 2", role: "research" },
+    { id: "forum-01", label: "Forum 1", role: "forum", model: process.env.JARVIS_FORUM_01_MODEL?.trim() },
+    { id: "forum-02", label: "Forum 2", role: "forum", model: process.env.JARVIS_FORUM_02_MODEL?.trim() },
+    { id: "forum-03", label: "Forum 3", role: "forum", model: process.env.JARVIS_FORUM_03_MODEL?.trim() },
+    { id: "counsel-01", label: "Counsel 1", role: "counsel", model: process.env.JARVIS_COUNSEL_01_MODEL?.trim() },
+    { id: "counsel-02", label: "Counsel 2", role: "counsel", model: process.env.JARVIS_COUNSEL_02_MODEL?.trim() },
+    { id: "counsel-03", label: "Counsel 3", role: "counsel", model: process.env.JARVIS_COUNSEL_03_MODEL?.trim() },
+    { id: "research-01", label: "Research 1", role: "research", model: process.env.JARVIS_RESEARCH_01_MODEL?.trim() },
+    { id: "research-02", label: "Research 2", role: "research", model: process.env.JARVIS_RESEARCH_02_MODEL?.trim() },
   ];
   const stableIds = seats.map((seat) => seat.id);
   const allAgentIds = ["main", ...stableIds];
@@ -309,6 +419,7 @@ function applyJarvisMultiAgentScaffoldV1(workspaceDir) {
         name: seat.label,
         workspace: path.join(agentRoot, seat.id),
         identity: { name: seat.label },
+        ...(seat.model ? { model: seat.model } : {}),
         tools: {
           allow: desiredAllow,
           deny: desiredDeny,
@@ -316,6 +427,11 @@ function applyJarvisMultiAgentScaffoldV1(workspaceDir) {
       };
       configChanged = true;
       continue;
+    }
+
+    if (seat.model && existingSeat.model !== seat.model) {
+      existingSeat.model = seat.model;
+      configChanged = true;
     }
 
     existingSeat.tools ??= {};
@@ -385,8 +501,9 @@ function applyJarvisMultiAgentScaffoldV1(workspaceDir) {
     if (!verified.agents?.entries?.[id]) {
       throw new Error("multi-agent scaffold verification failed: missing " + id);
     }
-    if (verified.agents.entries[id].model !== undefined) {
-      throw new Error("multi-agent scaffold verification failed: model pinned on " + id);
+    const expectedSeat = seats.find((seat) => seat.id === id);
+    if (expectedSeat?.model && verified.agents.entries[id].model !== expectedSeat.model) {
+      throw new Error("multi-agent scaffold verification failed: model assignment mismatch on " + id);
     }
     if (!verified.agents?.entries?.main?.subagents?.allowAgents?.includes(id)) {
       throw new Error("multi-agent scaffold verification failed: main cannot spawn " + id);
@@ -462,6 +579,12 @@ export function applyPrivateWorkspaceSeed(workspaceDir) {
     applyJarvisOrchestrationPolicyV1(workspaceDir);
   } catch (err) {
     console.warn(`[orchestration-v1] failed: ${String(err)}`);
+  }
+
+  try {
+    applyJarvisWhatsAppRoomsV1(workspaceDir);
+  } catch (err) {
+    console.warn(`[whatsapp-rooms-v1] failed: ${String(err)}`);
   }
 
   try {
