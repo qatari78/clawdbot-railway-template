@@ -102,25 +102,38 @@ function findKeys({ stateDir, configPath }) {
 
 
 async function resolveOpenRouterKeyViaGateway(configPath) {
+  const cfg = readJson(configPath);
+  if (!cfg) return null;
+
+  let mod;
   try {
-    const cfg = readJson(configPath);
-    if (!cfg) return null;
-    const mod = await import("file:///openclaw/dist/cli/command-secret-gateway.js");
-    const resolved = await mod.resolveCommandSecretRefsViaGateway({
-      config: cfg,
-      commandName: "openrouter key metadata audit",
-      targetIds: new Set(["models.providers.*.apiKey"]),
-      allowedPaths: new Set(["models.providers.openrouter.apiKey"]),
-      forcedActivePaths: new Set(["models.providers.openrouter.apiKey"]),
-      mode: "enforce_resolved",
-      allowLocalExecSecretRefs: false,
-      gatewaySecretResolveTimeoutMs: 15_000,
-    });
-    const key = resolved?.resolvedConfig?.models?.providers?.openrouter?.apiKey;
-    return typeof key === "string" && key.trim() ? key.trim() : null;
+    mod = await import("file:///openclaw/dist/cli/command-secret-gateway.js");
   } catch {
     return null;
   }
+
+  // Wrapper readiness can precede publication of the active secret snapshot by
+  // a few seconds. Retry only this read-only resolution path, with a hard bound.
+  for (let attempt = 1; attempt <= 6; attempt += 1) {
+    try {
+      const resolved = await mod.resolveCommandSecretRefsViaGateway({
+        config: cfg,
+        commandName: "openrouter key metadata audit",
+        targetIds: new Set(["models.providers.*.apiKey"]),
+        allowedPaths: new Set(["models.providers.openrouter.apiKey"]),
+        forcedActivePaths: new Set(["models.providers.openrouter.apiKey"]),
+        mode: "enforce_resolved",
+        allowLocalExecSecretRefs: false,
+        gatewaySecretResolveTimeoutMs: 15_000,
+      });
+      const key = resolved?.resolvedConfig?.models?.providers?.openrouter?.apiKey;
+      if (typeof key === "string" && key.trim()) return key.trim();
+    } catch {
+      // Bounded retry below; never log the secret or resolver payload.
+    }
+    if (attempt < 6) await new Promise((resolve) => setTimeout(resolve, 1_500));
+  }
+  return null;
 }
 
 function pickData(data) {
