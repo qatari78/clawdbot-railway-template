@@ -1608,6 +1608,9 @@ function applyJarvisOperationalDefaults() {
     const cfg = JSON.parse(raw);
 
     cfg.tools ??= {};
+    // Remove stale legacy explicit allowlists. They override profile resolution and
+    // can make leaf adviser agents fail before the model is called.
+    delete cfg.tools.allow;
     cfg.tools.profile = "coding";
     cfg.tools.loopDetection ??= {};
     // Cost-safety: fail fast on repetitive tool patterns instead of allowing
