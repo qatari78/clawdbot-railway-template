@@ -307,6 +307,11 @@ function launchOpenRouterKeyAuditV1() {
     stateDir: STATE_DIR,
     configPath: configPath(),
     workspaceDir: WORKSPACE_DIR,
+    runCmd,
+    clawArgs,
+    openclawNode: OPENCLAW_NODE,
+    gatewayToken: OPENCLAW_GATEWAY_TOKEN,
+    gatewayPort: INTERNAL_GATEWAY_PORT,
   }).catch((err) => {
     console.warn(`[openrouter-key-audit-v1] failed: ${String(err)}`);
   });
