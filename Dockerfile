@@ -39,6 +39,10 @@ RUN set -eux; \
 RUN node <<'NODE'
 const fs = require("fs");
 const p = "extensions/browser/src/browser-tool.ts";
+if (!fs.existsSync(p)) {
+  console.log("browser dashboard compatibility patch skipped: target file not present on this OpenClaw ref");
+  process.exit(0);
+}
 let s = fs.readFileSync(p, "utf8");
 const old = '      const dashboardName = readStringParam(params, "dashboard");\n      let browserDashboard: BrowserDashboardResponse | undefined;';
 const replacement = '      let dashboardName = readStringParam(params, "dashboard");\n' +
