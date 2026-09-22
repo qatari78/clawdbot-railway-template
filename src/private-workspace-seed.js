@@ -263,8 +263,9 @@ function applyJarvisMultiAgentScaffoldV1(workspaceDir) {
     configChanged = true;
   }
 
-  const adviserAllow = ["read", "sessions_send", "session_status"];
+  const adviserAllow = ["sessions_send", "session_status"];
   const adviserDeny = [
+    "read",
     "sessions_spawn",
     "sessions_list",
     "sessions_history",
@@ -280,8 +281,9 @@ function applyJarvisMultiAgentScaffoldV1(workspaceDir) {
     "edit",
     "apply_patch",
   ];
-  const researchAllow = ["read", "browser", "web_search", "web_fetch"];
+  const researchAllow = ["browser", "web_search", "web_fetch"];
   const researchDeny = [
+    "read",
     "sessions_spawn",
     "sessions_send",
     "sessions_list",
@@ -297,18 +299,34 @@ function applyJarvisMultiAgentScaffoldV1(workspaceDir) {
   ];
 
   for (const seat of seats) {
-    if (cfg.agents.entries[seat.id]) continue;
     const isResearch = seat.role === "research";
-    cfg.agents.entries[seat.id] = {
-      name: seat.label,
-      workspace: path.join(agentRoot, seat.id),
-      identity: { name: seat.label },
-      tools: {
-        allow: isResearch ? researchAllow : adviserAllow,
-        deny: isResearch ? researchDeny : adviserDeny,
-      },
-    };
-    configChanged = true;
+    const desiredAllow = isResearch ? researchAllow : adviserAllow;
+    const desiredDeny = isResearch ? researchDeny : adviserDeny;
+    const existingSeat = cfg.agents.entries[seat.id];
+
+    if (!existingSeat) {
+      cfg.agents.entries[seat.id] = {
+        name: seat.label,
+        workspace: path.join(agentRoot, seat.id),
+        identity: { name: seat.label },
+        tools: {
+          allow: desiredAllow,
+          deny: desiredDeny,
+        },
+      };
+      configChanged = true;
+      continue;
+    }
+
+    existingSeat.tools ??= {};
+    if (JSON.stringify(existingSeat.tools.allow ?? []) !== JSON.stringify(desiredAllow)) {
+      existingSeat.tools.allow = desiredAllow;
+      configChanged = true;
+    }
+    if (JSON.stringify(existingSeat.tools.deny ?? []) !== JSON.stringify(desiredDeny)) {
+      existingSeat.tools.deny = desiredDeny;
+      configChanged = true;
+    }
   }
 
   cfg.tools ??= {};
@@ -372,6 +390,10 @@ function applyJarvisMultiAgentScaffoldV1(workspaceDir) {
     }
     if (!verified.agents?.entries?.main?.subagents?.allowAgents?.includes(id)) {
       throw new Error("multi-agent scaffold verification failed: main cannot spawn " + id);
+    }
+    const seatTools = verified.agents.entries[id].tools ?? {};
+    if (seatTools.allow?.includes("read") || !seatTools.deny?.includes("read")) {
+      throw new Error("multi-agent scaffold verification failed: filesystem read still enabled on " + id);
     }
   }
   if (verified.agents?.defaults?.model?.primary !== originalPrimaryModel) {
