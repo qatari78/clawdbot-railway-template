@@ -7,7 +7,17 @@ on:
       - main
 
 jobs:
+  wrapper-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check wrapper JavaScript syntax
+        run: npm run lint
+
   docker-build:
+    needs: wrapper-lint
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
