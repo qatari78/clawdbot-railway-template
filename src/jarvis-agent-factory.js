@@ -188,7 +188,7 @@ function permissionTemplate(agentClass, requestedTools) {
   if (agentClass === "adviser") {
     if (requestedTools.length) fail("Adviser class does not accept custom tools");
     return {
-      allow: ["sessions_send", "session_status"],
+      allow: ["message", "sessions_send", "session_status"],
       deny: [...CORE_DENY, "browser", "web_search", "web_fetch"],
     };
   }
