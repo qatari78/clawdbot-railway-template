@@ -10,6 +10,7 @@ import * as tar from "tar";
 import { applyPrivateWorkspaceSeed } from "./private-workspace-seed.js";
 import { installJarvisAgentFactoryV1 } from "./jarvis-agent-factory.js";
 import { runJarvisAgentSmokeV1 } from "./jarvis-agent-smoke.js";
+import { runJarvisSecurityAuditV1 } from "./jarvis-security-audit.js";
 
 // Migrate deprecated CLAWDBOT_* env vars → OPENCLAW_* so existing Railway deployments
 // keep working. Users should update their Railway Variables to use the new names.
@@ -286,6 +287,17 @@ function launchJarvisAgentSmokeV1() {
     openclawNode: OPENCLAW_NODE,
   }).catch((err) => {
     console.warn(`[agent-smoke-v1] failed: ${String(err)}`);
+  });
+}
+
+function launchJarvisSecurityAuditV1() {
+  void runJarvisSecurityAuditV1({
+    workspaceDir: WORKSPACE_DIR,
+    runCmd,
+    clawArgs,
+    openclawNode: OPENCLAW_NODE,
+  }).catch((err) => {
+    console.warn(`[security-audit-v1] failed: ${String(err)}`);
   });
 }
 
@@ -1900,6 +1912,7 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
     try {
       await ensureGatewayRunning();
       console.log("[wrapper] gateway ready");
+      launchJarvisSecurityAuditV1();
       launchJarvisAgentSmokeV1();
     } catch (err) {
       console.error(`[wrapper] gateway failed to start at boot: ${String(err)}`);
@@ -1912,6 +1925,7 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
           await ensureGatewayRunning();
           console.log("[wrapper] gateway ready after retry");
           clearInterval(gatewayRetryTimer);
+          launchJarvisSecurityAuditV1();
           launchJarvisAgentSmokeV1();
         } catch (retryErr) {
           console.warn(`[wrapper] gateway retry not ready yet: ${String(retryErr)}`);
