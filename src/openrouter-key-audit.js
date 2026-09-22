@@ -100,6 +100,29 @@ function findKeys({ stateDir, configPath }) {
   return sources;
 }
 
+
+async function resolveOpenRouterKeyViaGateway(configPath) {
+  try {
+    const cfg = readJson(configPath);
+    if (!cfg) return null;
+    const mod = await import("file:///openclaw/dist/cli/command-secret-gateway.js");
+    const resolved = await mod.resolveCommandSecretRefsViaGateway({
+      config: cfg,
+      commandName: "openrouter key metadata audit",
+      targetIds: new Set(["models.providers.*.apiKey"]),
+      allowedPaths: new Set(["models.providers.openrouter.apiKey"]),
+      forcedActivePaths: new Set(["models.providers.openrouter.apiKey"]),
+      mode: "enforce_resolved",
+      allowLocalExecSecretRefs: false,
+      gatewaySecretResolveTimeoutMs: 15_000,
+    });
+    const key = resolved?.resolvedConfig?.models?.providers?.openrouter?.apiKey;
+    return typeof key === "string" && key.trim() ? key.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
 function pickData(data) {
   if (!data || typeof data !== "object") return null;
   const keys = [
@@ -124,6 +147,16 @@ export async function runOpenRouterKeyAuditV1({ stateDir, configPath, workspaceD
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
 
   const found = findKeys({ stateDir, configPath });
+  const gatewayResolvedKey = await resolveOpenRouterKeyViaGateway(configPath);
+  if (gatewayResolvedKey && !found.some((item) => item.key === gatewayResolvedKey)) {
+    found.unshift({
+      source: "gateway-secrets-resolve",
+      agentId: null,
+      profileId: null,
+      key: gatewayResolvedKey,
+    });
+  }
+
   let result;
   if (!found.length) {
     result = { ok: false, reason: "openrouter-key-not-resolved", candidates: 0 };
