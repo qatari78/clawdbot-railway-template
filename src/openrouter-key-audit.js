@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 function readJson(p) {
   try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return null; }
@@ -15,33 +16,73 @@ function findKeys({ stateDir, configPath }) {
     sources.push({ ...entry, key });
   };
 
-  // v2026.3.x stores provider credentials per agent. Scan only the canonical
-  // auth-profile filenames; never inspect transcripts/workspaces for secrets.
+  // Scan only canonical provider-auth stores; never inspect transcripts or
+  // workspaces for secrets. v2026.9.x stores auth profiles in SQLite, while
+  // older installations may still retain JSON migration sources.
   const agentsRoot = path.join(stateDir, "agents");
+
+  const scanProfileStore = (store, source, agentId) => {
+    if (!store?.profiles || typeof store.profiles !== "object") return;
+    for (const [profileId, profile] of Object.entries(store.profiles)) {
+      if (profile?.provider !== "openrouter") continue;
+      if (typeof profile.key === "string") {
+        add({ source, agentId, profileId, key: profile.key });
+      }
+    }
+  };
+
+  const scanSqlite = (dbPath, source, agentId) => {
+    if (!fs.existsSync(dbPath)) return;
+    let db;
+    try {
+      db = new DatabaseSync(dbPath, { readOnly: true });
+      const tables = db.prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('auth_profile_store','auth_profile_stores')"
+      ).all();
+      for (const row of tables) {
+        const table = String(row.name);
+        let rows = [];
+        try { rows = db.prepare(`SELECT store_json FROM ${table}`).all(); } catch { continue; }
+        for (const value of rows) {
+          if (typeof value?.store_json !== "string") continue;
+          let store;
+          try { store = JSON.parse(value.store_json); } catch { continue; }
+          scanProfileStore(store, source + ":" + table, agentId);
+        }
+      }
+    } catch {
+      // Diagnostic is best-effort and read-only.
+    } finally {
+      try { db?.close(); } catch {}
+    }
+  };
+
   try {
     for (const agentId of fs.readdirSync(agentsRoot)) {
-      const authPath = path.join(agentsRoot, agentId, "agent", "auth-profiles.json");
-      const auth = readJson(authPath);
-      if (!auth) continue;
+      const agentDir = path.join(agentsRoot, agentId, "agent");
 
-      if (auth.profiles && typeof auth.profiles === "object") {
-        for (const [profileId, profile] of Object.entries(auth.profiles)) {
-          if (profile?.provider === "openrouter" && typeof profile.key === "string") {
-            add({ source: "agent-auth-profile", agentId, profileId, key: profile.key });
+      const authPath = path.join(agentDir, "auth-profiles.json");
+      const auth = readJson(authPath);
+      if (auth) {
+        scanProfileStore(auth, "agent-auth-profile-json", agentId);
+
+        // Older flat shape, migration source only.
+        const flat = auth.openrouter;
+        if (flat && typeof flat === "object") {
+          const flatKey = typeof flat.apiKey === "string" ? flat.apiKey : flat.key;
+          if (typeof flatKey === "string") {
+            add({ source: "agent-auth-legacy-flat", agentId, profileId: null, key: flatKey });
           }
         }
       }
 
-      // Older flat shape, migration source only.
-      const flat = auth.openrouter;
-      if (flat && typeof flat === "object") {
-        const flatKey = typeof flat.apiKey === "string" ? flat.apiKey : flat.key;
-        if (typeof flatKey === "string") {
-          add({ source: "agent-auth-legacy-flat", agentId, profileId: null, key: flatKey });
-        }
-      }
+      scanSqlite(path.join(agentDir, "openclaw-agent.sqlite"), "agent-auth-sqlite", agentId);
     }
   } catch {}
+
+  // Shared auth profiles live here on current OpenClaw; older migrated installs
+  // may still keep the shared row in main's agent DB, already covered above.
+  scanSqlite(path.join(stateDir, "state", "openclaw.sqlite"), "shared-auth-sqlite", null);
 
   const envKey = process.env.OPENROUTER_API_KEY?.trim();
   if (envKey) add({ source: "process-env", agentId: null, profileId: null, key: envKey });
