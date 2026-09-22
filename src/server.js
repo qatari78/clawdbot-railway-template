@@ -8,6 +8,7 @@ import express from "express";
 import httpProxy from "http-proxy";
 import * as tar from "tar";
 import { applyPrivateWorkspaceSeed } from "./private-workspace-seed.js";
+import { installJarvisAgentFactoryV1 } from "./jarvis-agent-factory.js";
 import { runJarvisAgentSmokeV1 } from "./jarvis-agent-smoke.js";
 
 // Migrate deprecated CLAWDBOT_* env vars → OPENCLAW_* so existing Railway deployments
@@ -1696,6 +1697,9 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
 
   // Apply private workspace seed from Railway-only payload, if present.
   applyPrivateWorkspaceSeed(WORKSPACE_DIR);
+
+  // Install the controlled permanent-agent factory after canonical seat reconciliation.
+  installJarvisAgentFactoryV1(WORKSPACE_DIR);
 
   // Apply Jarvis operational tool/browser settings directly, avoiding slow CLI chains.
   applyJarvisOperationalDefaults();
