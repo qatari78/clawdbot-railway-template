@@ -160,7 +160,7 @@ async function waitForGatewayReady(opts = {}) {
   while (Date.now() - start < timeoutMs) {
     try {
       // Try the default Control UI base path, then fall back to root.
-      const paths = ["/openclaw", "/"];
+      const paths = ["/healthz", "/openclaw", "/"];
       for (const p of paths) {
         try {
           const res = await fetch(`${GATEWAY_TARGET}${p}`, { method: "GET" });
