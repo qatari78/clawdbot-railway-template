@@ -329,7 +329,7 @@ function requireSetupAuth(req, res, next) {
   const decoded = Buffer.from(encoded, "base64").toString("utf8");
   const idx = decoded.indexOf(":");
   const password = idx >= 0 ? decoded.slice(idx + 1) : "";
-  if (password !== SETUP_PASSWORD) {
+  if (!safeEqual(password, SETUP_PASSWORD)) {
     res.set("WWW-Authenticate", 'Basic realm="OpenClaw Setup"');
     return res.status(401).send("Invalid password");
   }
@@ -340,10 +340,42 @@ const app = express();
 app.disable("x-powered-by");
 app.use(express.json({ limit: "1mb" }));
 
+function requireSameOriginForAdminWrite(req, res, next) {
+  if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") return next();
+
+  // Modern browsers identify cross-site form/fetch requests even when an Origin
+  // header is omitted by a legacy path. Non-browser API clients typically send
+  // neither header and remain supported.
+  const fetchSite = String(req.headers["sec-fetch-site"] || "").toLowerCase();
+  if (fetchSite === "cross-site") {
+    return res.status(403).json({ ok: false, error: "Cross-site admin request rejected" });
+  }
+
+  const origin = String(req.headers.origin || "").trim();
+  if (!origin) return next();
+
+  const forwardedProto = String(req.headers["x-forwarded-proto"] || "")
+    .split(",")[0]
+    .trim();
+  const proto = forwardedProto || (req.socket?.encrypted ? "https" : "http");
+  const host = String(req.headers.host || "").trim();
+  if (!host || origin !== `${proto}://${host}`) {
+    return res.status(403).json({ ok: false, error: "Admin request origin mismatch" });
+  }
+  return next();
+}
+
 // Setup/admin responses may contain sensitive operational data; never let browsers or proxies cache them.
-app.use("/setup", (_req, res, next) => {
+app.use("/setup", requireSameOriginForAdminWrite, (_req, res, next) => {
   res.set("Cache-Control", "no-store");
   res.set("Pragma", "no-cache");
+  res.set("X-Content-Type-Options", "nosniff");
+  res.set("X-Frame-Options", "DENY");
+  res.set("Referrer-Policy", "no-referrer");
+  res.set(
+    "Content-Security-Policy",
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+  );
   next();
 });
 
@@ -912,7 +944,7 @@ app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
 
   return respondJson(ok ? 200 : 500, {
     ok,
-    output: `${prefix}${onboard.output}${extra}`,
+    output: redactSecrets(`${prefix}${onboard.output}${extra}`),
   });
   } catch (err) {
     console.error("[/setup/api/run] error:", err);
@@ -1138,6 +1170,7 @@ app.post("/setup/api/config/raw", requireSetupAuth, async (req, res) => {
     if (fs.existsSync(p)) {
       const backupPath = `${p}.bak-${new Date().toISOString().replace(/[:.]/g, "-")}`;
       fs.copyFileSync(p, backupPath);
+      try { fs.chmodSync(backupPath, 0o600); } catch {}
     }
 
     fs.writeFileSync(p, content, { encoding: "utf8", mode: 0o600 });
@@ -1158,8 +1191,13 @@ app.post("/setup/api/pairing/approve", requireSetupAuth, async (req, res) => {
   if (!channel || !code) {
     return res.status(400).json({ ok: false, error: "Missing channel or code" });
   }
-  const r = await runCmd(OPENCLAW_NODE, clawArgs(["pairing", "approve", String(channel), String(code)]));
-  return res.status(r.code === 0 ? 200 : 500).json({ ok: r.code === 0, output: r.output });
+  const channelId = String(channel).trim();
+  const pairingCode = String(code).trim();
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(channelId) || !/^[A-Za-z0-9_-]{4,128}$/.test(pairingCode)) {
+    return res.status(400).json({ ok: false, error: "Invalid pairing channel or code" });
+  }
+  const r = await runCmd(OPENCLAW_NODE, clawArgs(["pairing", "approve", channelId, pairingCode]));
+  return res.status(r.code === 0 ? 200 : 500).json({ ok: r.code === 0, output: redactSecrets(r.output) });
 });
 
 // Device pairing helper (list + approve) to avoid needing SSH.
@@ -1340,9 +1378,13 @@ app.post("/setup/import", requireSetupAuth, async (req, res) => {
       gzip: true,
       strict: true,
       onwarn: () => {},
-      filter: (p) => {
-        // Allow only paths that look safe.
-        return looksSafeTarPath(p);
+      filter: (p, entry) => {
+        // Allow only safe relative paths. Restore archives do not need links;
+        // rejecting symlink/hardlink entries prevents link-based escape tricks.
+        if (!looksSafeTarPath(p)) return false;
+        const type = String(entry?.type || "");
+        if (type === "SymbolicLink" || type === "Link") return false;
+        return true;
       },
     });
 
