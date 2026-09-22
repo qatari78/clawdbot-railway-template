@@ -1619,6 +1619,13 @@ function applyJarvisOperationalDefaults() {
       "gateway",
     ]));
 
+    // Dedicated Jarvis WhatsApp front door: keep first-run access conservative.
+    // Unknown DMs must pair; groups stay disabled until explicitly opened.
+    cfg.channels ??= {};
+    cfg.channels.whatsapp ??= {};
+    cfg.channels.whatsapp.enabled = true;
+    cfg.channels.whatsapp.dmPolicy = "pairing";
+    cfg.channels.whatsapp.groupPolicy = "disabled";
     cfg.browser ??= {};
     cfg.browser.enabled = true;
     cfg.browser.executablePath = "/usr/bin/chromium";
