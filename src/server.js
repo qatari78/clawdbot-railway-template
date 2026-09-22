@@ -1610,7 +1610,19 @@ function applyJarvisOperationalDefaults() {
     cfg.tools ??= {};
     cfg.tools.profile = "coding";
     cfg.tools.loopDetection ??= {};
-    if (cfg.tools.loopDetection.enabled === undefined) cfg.tools.loopDetection.enabled = true;
+    // Cost-safety: fail fast on repetitive tool patterns instead of allowing
+    // dozens of model/tool iterations to burn tokens without producing value.
+    cfg.tools.loopDetection.enabled = true;
+    cfg.tools.loopDetection.historySize = 30;
+    cfg.tools.loopDetection.warningThreshold = 4;
+    cfg.tools.loopDetection.criticalThreshold = 8;
+    cfg.tools.loopDetection.globalCircuitBreakerThreshold = 12;
+    cfg.tools.loopDetection.detectors = {
+      ...(cfg.tools.loopDetection.detectors ?? {}),
+      genericRepeat: true,
+      knownPollNoProgress: true,
+      pingPong: true,
+    };
     if (cfg.tools.codeMode === undefined) cfg.tools.codeMode = "auto";
     cfg.tools.alsoAllow = Array.from(new Set([
       ...(Array.isArray(cfg.tools.alsoAllow) ? cfg.tools.alsoAllow : []),
@@ -1618,6 +1630,56 @@ function applyJarvisOperationalDefaults() {
       "browser",
       "gateway",
     ]));
+
+    // Non-revenue-token controls: keep frontier intelligence, cap pathological
+    // completion envelopes, and make adviser seats pure reasoning leaves.
+    cfg.agents ??= {};
+    cfg.agents.defaults ??= {};
+    cfg.agents.defaults.models ??= {};
+    cfg.agents.defaults.subagents ??= {};
+    cfg.agents.defaults.subagents.maxConcurrent = 4;
+    cfg.agents.defaults.subagents.maxSpawnDepth = 1;
+
+    const outputCaps = {
+      "openrouter/openai/gpt-5.6-sol": 16384,
+      "openrouter/anthropic/claude-fable-5.1": 16384,
+      "openrouter/anthropic/claude-sonnet-5": 12288,
+      "openrouter/x-ai/grok-4.7": 12288,
+      "openrouter/google/gemini-3.8-flash": 8192,
+    };
+    for (const [modelRef, maxTokens] of Object.entries(outputCaps)) {
+      const current = cfg.agents.defaults.models[modelRef];
+      const modelCfg = current && typeof current === "object" && !Array.isArray(current)
+        ? current
+        : {};
+      modelCfg.params ??= {};
+      modelCfg.params.maxTokens = maxTokens;
+      cfg.agents.defaults.models[modelRef] = modelCfg;
+    }
+
+    // Forum/Counsel advisers should return text, not orchestrate more work.
+    // An explicit allowlist containing tools unavailable to native subagents
+    // caused prompt-stage failures and retry/fallback churn, so use a minimal
+    // profile and deny even its two built-ins.
+    const adviserIds = [
+      "forum-01", "forum-02", "forum-03",
+      "counsel-01", "counsel-02", "counsel-03",
+    ];
+    for (const id of adviserIds) {
+      const entry = cfg.agents.entries?.[id];
+      if (!entry) continue;
+      entry.tools ??= {};
+      entry.tools.profile = "minimal";
+      delete entry.tools.allow;
+      entry.tools.deny = Array.from(new Set([
+        ...(Array.isArray(entry.tools.deny) ? entry.tools.deny : []),
+        "session_status", "gateway",
+        "message", "sessions_send", "sessions_spawn", "sessions_list",
+        "sessions_history", "sessions_search", "sessions_yield", "subagents",
+        "browser", "web_search", "web_fetch", "skill_workshop",
+        "exec", "process", "read", "write", "edit", "apply_patch",
+      ]));
+    }
 
     // Dedicated Jarvis WhatsApp front door: keep first-run access conservative.
     // Unknown DMs must pair. Groups remain disabled unless the explicit
@@ -1636,13 +1698,12 @@ function applyJarvisOperationalDefaults() {
     cfg.browser.noSandbox = true;
     cfg.browser.defaultProfile ??= "openclaw";
 
-    // Keep autonomous learning reviewable until Salem explicitly promotes it to auto.
+    // Autonomous Skill Workshop reviews are model calls. Keep learning available
+    // only when explicitly requested; do not spend tokens after ordinary turns.
     cfg.skills ??= {};
     cfg.skills.workshop ??= {};
     cfg.skills.workshop.autonomous ??= {};
-    if (cfg.skills.workshop.autonomous.mode === undefined) {
-      cfg.skills.workshop.autonomous.mode = "propose";
-    }
+    cfg.skills.workshop.autonomous.mode = "off";
 
     // Install a local high-priority recovery skill once. OpenClaw watches workspace
     // skills, so future human edits are preserved and picked up automatically.
@@ -1679,8 +1740,36 @@ function applyJarvisOperationalDefaults() {
       console.log("[wrapper] installed stuckless recovery skill");
     }
 
+    // Durable orchestration economics for the main Jarvis brain. Stable room
+    // seats are addressed as sessions, not spawned as background children, which
+    // avoids extra completion-announcement model turns for normal room traffic.
+    const agentsPolicyPath = path.join(WORKSPACE_DIR, "AGENTS.md");
+    const nrtMarker = "## Jarvis Non-Revenue Token Policy v1";
+    if (fs.existsSync(agentsPolicyPath)) {
+      let agentsText = fs.readFileSync(agentsPolicyPath, "utf8");
+      if (!agentsText.includes(nrtMarker)) {
+        const nrtPolicy = [
+          nrtMarker,
+          "",
+          "- Treat model calls like metered utility flow: every call must produce useful work for the owner.",
+          "- For stable Forum/Counsel seats, prefer sessions_send to agent:<seat-id>:main; do not sessions_spawn those seats for ordinary room turns, greetings, checks, or short advice.",
+          "- Directly addressed seat: one adviser call, no automatic synthesis.",
+          "- Forum 'everyone': at most three adviser calls plus one Jarvis synthesis. No research for greetings/check-ins. A second adviser round requires a material contradiction/gap or an explicit owner request.",
+          "- Counsel 'everyone': at most three independent seat calls plus one Counsel-01 synthesis. Do not silently substitute another model for a failed named seat; report the seat unavailable unless the owner asks for a fallback.",
+          "- Research: quick uses one researcher; standard uses at most two. Do not duplicate browsing across advisers. Deep follow-up is targeted to unresolved gaps only.",
+          "- Never poll sessions_list or sessions_history in a loop waiting for completion. Use the supported wait/yield/completion path once.",
+          "- One failed room/model call gets at most one changed-method retry. Do not create replacement-agent herds.",
+          "- Background learning/review is off. Use Skill Workshop only on explicit owner request.",
+          "- Large artifacts may be chunked or written to files instead of raising routine completion ceilings.",
+          "",
+        ].join("\n");
+        agentsText = agentsText.trimEnd() + "\n\n" + nrtPolicy;
+        fs.writeFileSync(agentsPolicyPath, agentsText, { encoding: "utf8", mode: 0o600 });
+      }
+    }
+
     fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
-    console.log("[wrapper] Jarvis operational defaults applied");
+    console.log("[wrapper] Jarvis operational defaults + non-revenue-token controls applied");
   } catch (err) {
     console.warn(`[wrapper] failed to apply Jarvis operational defaults: ${String(err)}`);
   }
