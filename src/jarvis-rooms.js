@@ -115,8 +115,8 @@ Counsel requires explicit owner authorization. A recommendation to use Counsel i
 
 For a substantive full-Counsel run, use all three configured Counsel seats unless the owner explicitly narrows participation.
 
-- `counsel-01` participates as an adviser in Round 1; it is not merely a referee.
-- Give `counsel-01`, `counsel-02`, and `counsel-03` the same frozen case/evidence packet.
+- \`counsel-01\` participates as an adviser in Round 1; it is not merely a referee.
+- Give \`counsel-01\`, \`counsel-02\`, and \`counsel-03\` the same frozen case/evidence packet.
 - Each seat must answer without receiving any other seat's current-run answer.
 - Do not enrich a later seat prompt with an earlier seat's output. First-round order must not create informational advantage.
 - Lock all first-round answers before exposing any of them to another seat or publishing them as room voices.
@@ -133,10 +133,10 @@ Peer review happens only after all first-round answers are locked.
 
 ### Final synthesis — fresh Counsel-01 context
 
-`counsel-01` is both a first-round adviser and the default final synthesizer, but those are separate calls.
+\`counsel-01\` is both a first-round adviser and the default final synthesizer, but those are separate calls.
 
-- After the adviser pass (and optional cross-review), invoke one fresh, isolated, one-shot `counsel-01` synthesis run rather than continuing the adviser conversation.
-- Use the runtime's supported fresh-session mechanism, normally a one-shot `sessions_spawn` targeted to `counsel-01` with no child-spawning permission. This transient run is not a new permanent seat.
+- After the adviser pass (and optional cross-review), invoke one fresh, isolated, one-shot \`counsel-01\` synthesis run rather than continuing the adviser conversation.
+- Use the runtime's supported fresh-session mechanism, normally a one-shot \`sessions_spawn\` targeted to \`counsel-01\` with no child-spawning permission. This transient run is not a new permanent seat.
 - The synthesis input contains the original owner question, frozen evidence/case packet, all locked first-round submissions, and any locked cross-review notes.
 - Present Counsel-01's own first-round submission as one peer submission alongside Counsel-02 and Counsel-03; instruct the synthesizer not to privilege or defend its earlier answer.
 - Final synthesis must preserve material disagreements and evidence uncertainty rather than manufacturing consensus.
@@ -149,10 +149,10 @@ When the active surface is WhatsApp and multiple room voices are exposed:
 
 - Finish and lock all first-round adviser outputs before publishing the first adviser bubble.
 - Publish one adviser voice per WhatsApp message rather than one combined transcript.
-- Use compact headers without square brackets: `*FORUM 1 · <MODEL>*` or `*COUNSEL 1 · <MODEL>*`.
+- Use compact headers without square brackets: \`*FORUM 1 · <MODEL>*\` or \`*COUNSEL 1 · <MODEL>*\`.
 - Optional peer-review responses get their own messages.
-- Publish final synthesis as its own message: `*COUNSEL · FINAL SYNTHESIS — <MODEL>*` (or the Forum equivalent when Jarvis synthesizes Forum).
-- Use the supported message tool to the same current conversation target, then suppress duplicate wrapper output with `NO_REPLY` when supported.
+- Publish final synthesis as its own message: \`*COUNSEL · FINAL SYNTHESIS — <MODEL>*\` (or the Forum equivalent when Jarvis synthesizes Forum).
+- Use the supported message tool to the same current conversation target, then suppress duplicate wrapper output with \`NO_REPLY\` when supported.
 - This is presentation only; keep the single Jarvis WhatsApp identity and stable backend seat IDs.
 ## Cost and quality guardrails
 
