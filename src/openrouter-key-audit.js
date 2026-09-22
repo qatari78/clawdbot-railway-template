@@ -101,38 +101,73 @@ function findKeys({ stateDir, configPath }) {
 }
 
 
-async function resolveOpenRouterKeyViaGateway(configPath) {
-  const cfg = readJson(configPath);
-  if (!cfg) return null;
+async function resolveOpenRouterKeyViaGateway({
+  runCmd,
+  clawArgs,
+  openclawNode,
+  gatewayToken,
+  gatewayPort,
+}) {
+  if (!gatewayToken) return null;
 
-  let mod;
-  try {
-    mod = await import("file:///openclaw/dist/cli/command-secret-gateway.js");
-  } catch {
-    return null;
-  }
+  const params = JSON.stringify({
+    commandName: "openrouter key metadata audit",
+    targetIds: ["models.providers.*.apiKey"],
+    allowedPaths: ["models.providers.openrouter.apiKey"],
+    forcedActivePaths: ["models.providers.openrouter.apiKey"],
+  });
 
-  // Wrapper readiness can precede publication of the active secret snapshot by
-  // a few seconds. Retry only this read-only resolution path, with a hard bound.
+  // The wrapper can mark the Gateway ready a moment before its active SecretRef
+  // snapshot is published. Retry only this read-only RPC with a hard bound.
   for (let attempt = 1; attempt <= 6; attempt += 1) {
-    try {
-      const resolved = await mod.resolveCommandSecretRefsViaGateway({
-        config: cfg,
-        commandName: "openrouter key metadata audit",
-        targetIds: new Set(["models.providers.*.apiKey"]),
-        allowedPaths: new Set(["models.providers.openrouter.apiKey"]),
-        forcedActivePaths: new Set(["models.providers.openrouter.apiKey"]),
-        mode: "enforce_resolved",
-        allowLocalExecSecretRefs: false,
-        gatewaySecretResolveTimeoutMs: 15_000,
-      });
-      const key = resolved?.resolvedConfig?.models?.providers?.openrouter?.apiKey;
-      if (typeof key === "string" && key.trim()) return key.trim();
-    } catch {
-      // Bounded retry below; never log the secret or resolver payload.
+    const r = await runCmd(
+      openclawNode,
+      clawArgs([
+        "gateway", "call", "secrets.resolve",
+        "--port", String(gatewayPort),
+        "--token", gatewayToken,
+        "--params", params,
+        "--timeout", "15000",
+        "--json",
+      ]),
+      { timeoutMs: 20_000 },
+    );
+
+    if (r.code === 0) {
+      const raw = String(r.output || "").trim();
+      let payload = null;
+      try {
+        payload = JSON.parse(raw);
+      } catch {
+        const first = raw.indexOf("{");
+        const last = raw.lastIndexOf("}");
+        if (first >= 0 && last > first) {
+          try { payload = JSON.parse(raw.slice(first, last + 1)); } catch {}
+        }
+      }
+
+      const assignments = Array.isArray(payload?.assignments)
+        ? payload.assignments
+        : Array.isArray(payload?.result?.assignments)
+          ? payload.result.assignments
+          : [];
+      for (const assignment of assignments) {
+        const parts = Array.isArray(assignment?.pathSegments) ? assignment.pathSegments : [];
+        if (
+          parts.join(".") === "models.providers.openrouter.apiKey" &&
+          typeof assignment?.value === "string" &&
+          assignment.value.trim()
+        ) {
+          return assignment.value.trim();
+        }
+      }
     }
-    if (attempt < 6) await new Promise((resolve) => setTimeout(resolve, 1_500));
+
+    if (attempt < 6) {
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+    }
   }
+
   return null;
 }
 
@@ -150,7 +185,16 @@ function pickData(data) {
   return out;
 }
 
-export async function runOpenRouterKeyAuditV1({ stateDir, configPath, workspaceDir }) {
+export async function runOpenRouterKeyAuditV1({
+  stateDir,
+  configPath,
+  workspaceDir,
+  runCmd,
+  clawArgs,
+  openclawNode,
+  gatewayToken,
+  gatewayPort,
+}) {
   if (process.env.JARVIS_OPENROUTER_KEY_AUDIT_V1?.trim() !== "1") {
     return { ran: false, reason: "disabled" };
   }
@@ -160,7 +204,13 @@ export async function runOpenRouterKeyAuditV1({ stateDir, configPath, workspaceD
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
 
   const found = findKeys({ stateDir, configPath });
-  const gatewayResolvedKey = await resolveOpenRouterKeyViaGateway(configPath);
+  const gatewayResolvedKey = await resolveOpenRouterKeyViaGateway({
+    runCmd,
+    clawArgs,
+    openclawNode,
+    gatewayToken,
+    gatewayPort,
+  });
   if (gatewayResolvedKey && !found.some((item) => item.key === gatewayResolvedKey)) {
     found.unshift({
       source: "gateway-secrets-resolve",
