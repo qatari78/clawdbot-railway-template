@@ -1,4 +1,5 @@
-// Isolated, non-destructive restore verifier.\nimport { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
+// Isolated, non-destructive restore verifier.
+import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
 import { gunzipSync } from "node:zlib";
 import http from "node:http";
 
