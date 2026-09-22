@@ -6,6 +6,39 @@ function readJson(p) {
   try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return null; }
 }
 
+function resolveSecretRefLocally(ref, stateDir) {
+  if (!ref || typeof ref !== "object") return null;
+  const source = String(ref.source || "");
+  const id = typeof ref.id === "string" ? ref.id.trim() : "";
+  if (!id) return null;
+
+  if (source === "env") {
+    const value = process.env[id];
+    return typeof value === "string" && value.trim() ? value.trim() : null;
+  }
+
+  if (source === "store") {
+    const dbPath = path.join(stateDir, "state", "openclaw.sqlite");
+    if (!fs.existsSync(dbPath)) return null;
+    let db;
+    try {
+      db = new DatabaseSync(dbPath, { readOnly: true });
+      const row = db.prepare(
+        "SELECT value FROM secret_store_entries WHERE scope_kind='team' AND scope_id='' AND name=? AND deleted_at_ms IS NULL LIMIT 1"
+      ).get(id);
+      const value = row?.value;
+      return typeof value === "string" && value.trim() ? value.trim() : null;
+    } catch {
+      return null;
+    } finally {
+      try { db?.close(); } catch {}
+    }
+  }
+
+  // File/exec refs deliberately stay outside this metadata diagnostic.
+  return null;
+}
+
 function findKeys({ stateDir, configPath }) {
   const sources = [];
   const seen = new Set();
@@ -27,6 +60,15 @@ function findKeys({ stateDir, configPath }) {
       if (profile?.provider !== "openrouter") continue;
       if (typeof profile.key === "string") {
         add({ source, agentId, profileId, key: profile.key });
+      }
+      const refKey = resolveSecretRefLocally(profile?.keyRef, stateDir);
+      if (refKey) {
+        add({
+          source: `${source}:keyRef:${String(profile.keyRef?.source || "unknown")}`,
+          agentId,
+          profileId,
+          key: refKey,
+        });
       }
     }
   };
@@ -93,7 +135,11 @@ function findKeys({ stateDir, configPath }) {
     add({ source: "config-env", agentId: null, profileId: null, key: cfgKey });
   }
   const providerKey = cfg?.models?.providers?.openrouter?.apiKey;
-  if (typeof providerKey === "string" && !providerKey.startsWith("${")) {
+  if (
+    typeof providerKey === "string" &&
+    !providerKey.startsWith("${") &&
+    providerKey !== "secretref-managed"
+  ) {
     add({ source: "config-provider", agentId: null, profileId: null, key: providerKey });
   }
 
