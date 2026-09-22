@@ -1641,11 +1641,15 @@ function applyJarvisOperationalDefaults() {
     cfg.agents.defaults.subagents.maxSpawnDepth = 1;
 
     const outputCaps = {
-      "openrouter/openai/gpt-5.6-sol": 16384,
-      "openrouter/anthropic/claude-fable-5.1": 16384,
-      "openrouter/anthropic/claude-sonnet-5": 12288,
-      "openrouter/x-ai/grok-4.7": 12288,
-      "openrouter/google/gemini-3.8-flash": 8192,
+      // 32k is the standard request envelope for reasoning seats. It avoids
+      // pathological 128k-440k affordability checks while preserving ample
+      // room for reasoning + visible answer. It is not a spend throttle:
+      // providers bill actual generated tokens, not this ceiling.
+      "openrouter/openai/gpt-5.6-sol": 32768,
+      "openrouter/anthropic/claude-fable-5.1": 32768,
+      "openrouter/anthropic/claude-sonnet-5": 32768,
+      "openrouter/x-ai/grok-4.7": 32768,
+      "openrouter/google/gemini-3.8-flash": 32768,
     };
     for (const [modelRef, maxTokens] of Object.entries(outputCaps)) {
       const current = cfg.agents.defaults.models[modelRef];
@@ -1760,7 +1764,8 @@ function applyJarvisOperationalDefaults() {
           "- Never poll sessions_list or sessions_history in a loop waiting for completion. Use the supported wait/yield/completion path once.",
           "- One failed room/model call gets at most one changed-method retry. Do not create replacement-agent herds.",
           "- Background learning/review is off. Use Skill Workshop only on explicit owner request.",
-          "- Large artifacts may be chunked or written to files instead of raising routine completion ceilings.",
+          "- The standard model request envelope is 32k. Treat it as an admission/reasoning envelope, not a spend throttle; actual usage is metered from generated tokens.",
+          "- Large artifacts should normally be written coherently in sections/files. Raise the per-job ceiling above 32k only when the requested deliverable genuinely benefits from one-shot generation; never restore 128k+ as the global default.",
           "",
         ].join("\n");
         agentsText = agentsText.trimEnd() + "\n\n" + nrtPolicy;
