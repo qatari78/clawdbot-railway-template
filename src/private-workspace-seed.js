@@ -263,7 +263,7 @@ function applyJarvisMultiAgentScaffoldV1(workspaceDir) {
     configChanged = true;
   }
 
-  const adviserAllow = ["sessions_send", "session_status"];
+  const adviserAllow = ["message", "sessions_send", "session_status"];
   const adviserDeny = [
     "read",
     "sessions_spawn",
