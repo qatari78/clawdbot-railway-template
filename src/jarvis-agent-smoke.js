@@ -12,9 +12,9 @@ export async function runJarvisAgentSmokeV1({
   }
 
   const dir = path.join(workspaceDir, "diagnostics");
-  const resultPath = path.join(dir, "room-seat-smoke-v3.json");
+  const resultPath = path.join(dir, "room-seat-smoke-v4.json");
   if (fs.existsSync(resultPath)) {
-    console.log("[agent-smoke-v3] prior result exists; skipping");
+    console.log("[agent-smoke-v4] prior result exists; skipping");
     return { ran: false, reason: "already-ran", resultPath };
   }
 
@@ -75,11 +75,11 @@ export async function runJarvisAgentSmokeV1({
   for (const [agentId, marker] of seats) {
     const result = await runAgent(agentId, marker);
     results.push(result);
-    console.log("[agent-smoke-v3] seat " + JSON.stringify(result));
+    console.log("[agent-smoke-v4] seat " + JSON.stringify(result));
   }
 
   const summary = {
-    version: 3,
+    version: 4,
     startedAt,
     finishedAt: new Date().toISOString(),
     seats: results,
@@ -95,7 +95,7 @@ export async function runJarvisAgentSmokeV1({
   });
   try { fs.chmodSync(resultPath, 0o600); } catch {}
 
-  console.log("[agent-smoke-v3] completed " + JSON.stringify({
+  console.log("[agent-smoke-v4] completed " + JSON.stringify({
     pass: summary.pass,
     toolFailures: summary.toolFailures,
     billingFailures: summary.billingFailures,
