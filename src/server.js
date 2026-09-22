@@ -1795,20 +1795,47 @@ server.on("upgrade", async (req, socket, head) => {
   proxy.ws(req, socket, head, { target: GATEWAY_TARGET });
 });
 
+let shutdownStarted = false;
+
+async function shutdownGracefully(signal) {
+  if (shutdownStarted) return;
+  shutdownStarted = true;
+  console.log(`[wrapper] received ${signal}; shutting down gateway cleanly...`);
+
+  const child = gatewayProc;
+  if (child) {
+    await new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+      child.once("exit", finish);
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        finish();
+      }
+      setTimeout(finish, 8_000).unref?.();
+    });
+  }
+
+  await new Promise((resolve) => {
+    try {
+      server.close(resolve);
+    } catch {
+      resolve();
+    }
+    setTimeout(resolve, 2_000).unref?.();
+  });
+
+  process.exit(0);
+}
+
 process.on("SIGTERM", () => {
-  // Best-effort shutdown
-  try {
-    if (gatewayProc) gatewayProc.kill("SIGTERM");
-  } catch {
-    // ignore
-  }
-
-  // Stop accepting new connections; allow in-flight requests to complete briefly.
-  try {
-    server.close(() => process.exit(0));
-  } catch {
-    process.exit(0);
-  }
-
-  setTimeout(() => process.exit(0), 5_000).unref?.();
+  void shutdownGracefully("SIGTERM");
+});
+process.on("SIGINT", () => {
+  void shutdownGracefully("SIGINT");
 });
