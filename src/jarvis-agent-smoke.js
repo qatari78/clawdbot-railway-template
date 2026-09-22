@@ -1,20 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
 
-function extractJsonObject(text) {
-  const raw = String(text || "").trim();
-  const first = raw.indexOf("{");
-  const last = raw.lastIndexOf("}");
-  if (first < 0 || last <= first) return null;
-  try { return JSON.parse(raw.slice(first, last + 1)); } catch { return null; }
-}
-
-function sessionKeys(output) {
-  const parsed = extractJsonObject(output);
-  const rows = Array.isArray(parsed?.sessions) ? parsed.sessions : [];
-  return new Set(rows.map((row) => String(row?.key || "")).filter(Boolean));
-}
-
 export async function runJarvisAgentSmokeV1({
   workspaceDir,
   runCmd,
@@ -26,108 +12,95 @@ export async function runJarvisAgentSmokeV1({
   }
 
   const dir = path.join(workspaceDir, "diagnostics");
-  const resultPath = path.join(dir, "research-routing-smoke-v1.json");
+  const resultPath = path.join(dir, "room-seat-smoke-v2.json");
   if (fs.existsSync(resultPath)) {
-    console.log("[agent-smoke-v1] prior result exists; skipping");
+    console.log("[agent-smoke-v2] prior result exists; skipping");
     return { ran: false, reason: "already-ran", resultPath };
   }
 
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const startedAt = new Date().toISOString();
 
-  const runAgent = async (agentId, message, expected, timeoutMs = 120_000) => {
+  const runAgent = async (agentId, marker, timeoutMs = 120_000) => {
     const start = Date.now();
-    const r = await runCmd(
-      openclawNode,
-      clawArgs(["agent", "--agent", agentId, "--message", message, "--json"]),
-      { timeoutMs },
-    );
-    return {
-      ok: r.code === 0 && String(r.output || "").includes(expected),
-      exitCode: r.code,
-      expectedMarkerSeen: String(r.output || "").includes(expected),
-      elapsedMs: Date.now() - start,
-    };
+    try {
+      const r = await runCmd(
+        openclawNode,
+        clawArgs([
+          "agent",
+          "--agent",
+          agentId,
+          "--message",
+          `Smoke test only. Do not browse or use tools. Reply exactly: ${marker}`,
+          "--json",
+        ]),
+        { timeoutMs },
+      );
+      const output = String(r.output || "");
+      return {
+        agentId,
+        ok: r.code === 0 && output.includes(marker),
+        exitCode: r.code,
+        expectedMarkerSeen: output.includes(marker),
+        elapsedMs: Date.now() - start,
+        errorClass: r.code === 0 ? null :
+          (/402|billing|credits|afford/i.test(output) ? "billing" :
+          (/No callable tools remain|tool allowlist|no registered tools/i.test(output) ? "tools" : "other")),
+      };
+    } catch (err) {
+      const output = String(err?.message || err || "");
+      return {
+        agentId,
+        ok: false,
+        exitCode: null,
+        expectedMarkerSeen: false,
+        elapsedMs: Date.now() - start,
+        errorClass:
+          (/402|billing|credits|afford/i.test(output) ? "billing" :
+          (/No callable tools remain|tool allowlist|no registered tools/i.test(output) ? "tools" : "other")),
+      };
+    }
   };
 
-  const direct01 = await runAgent(
-    "research-01",
-    "Smoke test only. Do not browse. Reply exactly: RESEARCH_01_OK",
-    "RESEARCH_01_OK",
-  );
+  const seats = [
+    ["forum-01", "FORUM_01_HI"],
+    ["forum-02", "FORUM_02_HI"],
+    ["forum-03", "FORUM_03_HI"],
+    ["counsel-01", "COUNSEL_01_HI"],
+    ["counsel-02", "COUNSEL_02_HI"],
+    ["counsel-03", "COUNSEL_03_HI"],
+  ];
 
-  const direct02 = await runAgent(
-    "research-02",
-    "Smoke test only. Do not browse. Reply exactly: RESEARCH_02_OK",
-    "RESEARCH_02_OK",
-  );
+  const results = [];
+  for (const [agentId, marker] of seats) {
+    const result = await runAgent(agentId, marker);
+    results.push(result);
+    console.log("[agent-smoke-v2] seat " + JSON.stringify(result));
+  }
 
-  const beforeSessions = await runCmd(
-    openclawNode,
-    clawArgs(["sessions", "--agent", "research-01", "--active", "10", "--limit", "100", "--json"]),
-    { timeoutMs: 30_000 },
-  );
-  const beforeKeys = sessionKeys(beforeSessions.output);
-
-  const routed = await runAgent(
-    "main",
-    [
-      "Internal orchestration smoke test.",
-      "You MUST use sessions_spawn to delegate one isolated child task to agentId research-01.",
-      "Give the child this exact task: Smoke test only. Do not browse. Reply exactly ROUTED_CHILD_OK.",
-      "Use a label containing smoke-research-route-v1 if the tool supports labels.",
-      "Wait for the child result using the supported session/subagent completion mechanism.",
-      "Reply exactly ROUTER_OK only if the delegated child returned ROUTED_CHILD_OK.",
-      "Do not browse, change configuration, restart services, or perform any other work.",
-    ].join(" "),
-    "ROUTER_OK",
-    180_000,
-  );
-
-  const afterSessions = await runCmd(
-    openclawNode,
-    clawArgs(["sessions", "--agent", "research-01", "--active", "10", "--limit", "100", "--json"]),
-    { timeoutMs: 30_000 },
-  );
-  const afterKeys = sessionKeys(afterSessions.output);
-  const newSubagentKeys = [...afterKeys].filter(
-    (key) => key.includes(":subagent:") && !beforeKeys.has(key),
-  );
-
-  const result = {
-    version: 1,
+  const summary = {
+    version: 2,
     startedAt,
     finishedAt: new Date().toISOString(),
-    directResearch01: direct01,
-    directResearch02: direct02,
-    jarvisDelegation: {
-      ...routed,
-      newResearchSubagentSessionObserved: newSubagentKeys.length > 0,
-      newResearchSubagentSessionCount: newSubagentKeys.length,
-    },
-    pass:
-      direct01.ok &&
-      direct02.ok &&
-      routed.ok &&
-      newSubagentKeys.length > 0,
+    seats: results,
+    pass: results.every((r) => r.ok),
+    toolFailures: results.filter((r) => r.errorClass === "tools").map((r) => r.agentId),
+    billingFailures: results.filter((r) => r.errorClass === "billing").map((r) => r.agentId),
+    otherFailures: results.filter((r) => !r.ok && r.errorClass === "other").map((r) => r.agentId),
   };
 
-  fs.writeFileSync(resultPath, JSON.stringify(result, null, 2) + "\n", {
+  fs.writeFileSync(resultPath, JSON.stringify(summary, null, 2) + "\n", {
     encoding: "utf8",
     mode: 0o600,
   });
   try { fs.chmodSync(resultPath, 0o600); } catch {}
 
-  console.log(
-    "[agent-smoke-v1] completed " +
-      JSON.stringify({
-        pass: result.pass,
-        research01: direct01.ok,
-        research02: direct02.ok,
-        jarvisDelegation: routed.ok,
-        delegatedSessionObserved: newSubagentKeys.length > 0,
-      }),
-  );
+  console.log("[agent-smoke-v2] completed " + JSON.stringify({
+    pass: summary.pass,
+    toolFailures: summary.toolFailures,
+    billingFailures: summary.billingFailures,
+    otherFailures: summary.otherFailures,
+  }));
 
-  return { ran: true, resultPath, pass: result.pass };
+  return { ran: true, resultPath, pass: summary.pass };
 }
