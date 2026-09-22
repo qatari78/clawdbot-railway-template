@@ -1627,12 +1627,34 @@ function applyJarvisOperationalDefaults() {
       pingPong: true,
     };
     if (cfg.tools.codeMode === undefined) cfg.tools.codeMode = "auto";
-    cfg.tools.alsoAllow = Array.from(new Set([
-      ...(Array.isArray(cfg.tools.alsoAllow) ? cfg.tools.alsoAllow : []),
-      "group:messaging",
-      "browser",
-      "gateway",
-    ]));
+    // v2026.3.8 merges global tools.alsoAllow into every agent profile.
+    // That turns the intentionally-empty "minimal" adviser profile into a
+    // restrictive explicit allowlist and aborts adviser runs before inference.
+    // Keep these additive capabilities on Jarvis/main only.
+    delete cfg.tools.alsoAllow;
+    const mainEntry = cfg.agents?.entries?.main;
+    if (mainEntry) {
+      mainEntry.tools ??= {};
+      mainEntry.tools.profile = mainEntry.tools.profile ?? "coding";
+      delete mainEntry.tools.allow;
+      mainEntry.tools.alsoAllow = Array.from(new Set([
+        ...(Array.isArray(mainEntry.tools.alsoAllow) ? mainEntry.tools.alsoAllow : []),
+        "group:messaging",
+        "browser",
+        "gateway",
+      ]));
+    }
+
+    // Researchers are evidence-only leaves. "full" contributes no profile-level
+    // allowlist, so their existing explicit browser/web allowlist stays authoritative
+    // instead of being intersected with the global coding profile.
+    for (const id of ["research-01", "research-02"]) {
+      const entry = cfg.agents?.entries?.[id];
+      if (!entry) continue;
+      entry.tools ??= {};
+      entry.tools.profile = "full";
+      delete entry.tools.alsoAllow;
+    }
 
     // Non-revenue-token controls: keep frontier intelligence, cap pathological
     // completion envelopes, and make adviser seats pure reasoning leaves.
