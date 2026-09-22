@@ -1,5 +1,6 @@
 // Isolated, non-destructive restore verifier.\nimport { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
 import { gunzipSync } from "node:zlib";
+import http from "node:http";
 
 const required = [".openclaw/openclaw.json", "workspace/AGENTS.md"];
 const bucket = process.env.BUCKET;
@@ -124,14 +125,16 @@ try {
 }
 
 const port = Number.parseInt(process.env.PORT || "3000", 10);
-const server = Bun.serve({
-  port,
-  fetch(req) {
-    const pathname = new URL(req.url).pathname;
-    if (pathname !== "/proof" && pathname !== "/healthz") {
-      return new Response("not found", { status: 404 });
-    }
-    return Response.json(result, { status: result.ok ? 200 : 500 });
-  },
+const server = http.createServer((req, res) => {
+  const pathname = new URL(req.url || "/", "http://localhost").pathname;
+  if (pathname !== "/proof" && pathname !== "/healthz") {
+    res.writeHead(404, { "content-type": "text/plain" });
+    res.end("not found");
+    return;
+  }
+  res.writeHead(result.ok ? 200 : 500, { "content-type": "application/json" });
+  res.end(JSON.stringify(result));
 });
-console.log(`RESTORE_PROOF_HTTP_READY port=${server.port}`);
+server.listen(port, "0.0.0.0", () => {
+  console.log(`RESTORE_PROOF_HTTP_READY port=${port}`);
+});
