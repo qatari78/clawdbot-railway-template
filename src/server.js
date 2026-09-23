@@ -774,6 +774,54 @@ function runCmd(cmd, args, opts = {}) {
   });
 }
 
+async function ensureJarvisLobsterV1() {
+  if (!isConfigured()) return { ok: false, reason: "not-configured" };
+
+  const markerDir = path.join(STATE_DIR, "jarvis");
+  const markerPath = path.join(markerDir, "lobster-v1.installed");
+  const workflowDir = path.join(WORKSPACE_DIR, "workflows");
+  const workflowPath = path.join(workflowDir, "jarvis-health-v1.lobster");
+
+  try {
+    fs.mkdirSync(markerDir, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(workflowDir, { recursive: true, mode: 0o700 });
+
+    if (!fs.existsSync(markerPath)) {
+      console.log("[lobster-v1] installing official @openclaw/lobster plugin...");
+      const install = await runCmd(
+        OPENCLAW_NODE,
+        clawArgs(["plugins", "install", "@openclaw/lobster"]),
+        { timeoutMs: 180_000 },
+      );
+      const alreadyInstalled = /already installed|already exists/i.test(String(install.output || ""));
+      if (install.code !== 0 && !alreadyInstalled) {
+        console.warn("[lobster-v1] install failed (continuing): " + redactSecrets(String(install.output || "")).slice(-2000));
+        return { ok: false, reason: "install-failed" };
+      }
+      fs.writeFileSync(markerPath, new Date().toISOString() + "\n", { encoding: "utf8", mode: 0o600 });
+      console.log("[lobster-v1] official plugin installed");
+    } else {
+      console.log("[lobster-v1] install marker present; skipping package install");
+    }
+
+    const workflow = [
+      "name: jarvis-health-v1",
+      "steps:",
+      "  - id: status",
+      "    command: openclaw status --json",
+      "  - id: plugins",
+      "    command: openclaw plugins list --json",
+      "",
+    ].join("\n");
+    fs.writeFileSync(workflowPath, workflow, { encoding: "utf8", mode: 0o600 });
+    console.log("[lobster-v1] read-only health workflow installed");
+    return { ok: true, workflowPath };
+  } catch (err) {
+    console.warn("[lobster-v1] setup failed (continuing): " + String(err));
+    return { ok: false, reason: "exception" };
+  }
+}
+
 app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
   try {
     const respondJson = (status, body) => {
@@ -1712,6 +1760,7 @@ function applyJarvisOperationalDefaults() {
         "group:messaging",
         "browser",
         "gateway",
+        "lobster",
       ]));
     }
 
@@ -1745,6 +1794,8 @@ function applyJarvisOperationalDefaults() {
     cfg.plugins.entries["memory-core"].config ??= {};
     cfg.plugins.entries["memory-core"].config.dreaming ??= {};
     cfg.plugins.entries["memory-core"].config.dreaming.enabled = false;
+    cfg.plugins.entries["lobster"] ??= {};
+    cfg.plugins.entries["lobster"].enabled = true;
 
     // Capability policy: do not impose Jarvis-specific output-token ceilings.
     // Let each provider/model use its native output/reasoning capacity. Financial
@@ -1892,12 +1943,32 @@ function applyJarvisOperationalDefaults() {
           "- Never poll sessions_list or sessions_history in a loop waiting for completion. Use the supported wait/yield/completion path once.",
           "- One failed room/model call gets at most one changed-method retry. Do not create replacement-agent herds.",
           "- Background learning/review is off. Use Skill Workshop only on explicit owner request.",
-          "- The standard model request envelope is 32k. Treat it as an admission/reasoning envelope, not a spend throttle; actual usage is metered from generated tokens.",
-          "- Large artifacts should normally be written coherently in sections/files. Raise the per-job ceiling above 32k only when the requested deliverable genuinely benefits from one-shot generation; never restore 128k+ as the global default.",
+          "- Do not impose Jarvis-specific output-token ceilings. Let each provider/model use its native output and reasoning capacity.",
+          "- Large artifacts may use the model/provider native capacity. Financial control belongs at the prepaid OpenRouter balance; behavioral safety comes from loop, recursion, concurrency, and tool-policy controls.",
           "",
         ].join("\n");
         agentsText = agentsText.trimEnd() + "\n\n" + nrtPolicy;
         fs.writeFileSync(agentsPolicyPath, agentsText, { encoding: "utf8", mode: 0o600 });
+      } else {
+        const oldPolicyLines = [
+          "- The standard model request envelope is 32k. Treat it as an admission/reasoning envelope, not a spend throttle; actual usage is metered from generated tokens.",
+          "- Large artifacts should normally be written coherently in sections/files. Raise the per-job ceiling above 32k only when the requested deliverable genuinely benefits from one-shot generation; never restore 128k+ as the global default.",
+        ];
+        const newPolicyLines = [
+          "- Do not impose Jarvis-specific output-token ceilings. Let each provider/model use its native output and reasoning capacity.",
+          "- Large artifacts may use the model/provider native capacity. Financial control belongs at the prepaid OpenRouter balance; behavioral safety comes from loop, recursion, concurrency, and tool-policy controls.",
+        ];
+        let changed = false;
+        for (let i = 0; i < oldPolicyLines.length; i += 1) {
+          if (agentsText.includes(oldPolicyLines[i])) {
+            agentsText = agentsText.replace(oldPolicyLines[i], newPolicyLines[i]);
+            changed = true;
+          }
+        }
+        if (changed) {
+          fs.writeFileSync(agentsPolicyPath, agentsText, { encoding: "utf8", mode: 0o600 });
+          console.log("[wrapper] removed stale 32k policy text from AGENTS.md");
+        }
       }
     }
 
@@ -1932,6 +2003,10 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
 
   // Install the controlled permanent-agent factory after canonical seat reconciliation.
   installJarvisAgentFactoryV1(WORKSPACE_DIR);
+
+  // Install the official Lobster workflow plugin into persistent OpenClaw state.
+  // Best-effort: a package/network failure must not prevent Jarvis from starting.
+  await ensureJarvisLobsterV1();
 
   // Apply Jarvis operational tool/browser settings directly, avoiding slow CLI chains.
   applyJarvisOperationalDefaults();
