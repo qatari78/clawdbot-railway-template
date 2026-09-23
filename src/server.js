@@ -1693,6 +1693,17 @@ function applyJarvisOperationalDefaults() {
     cfg.agents.defaults.subagents.maxConcurrent = 4;
     cfg.agents.defaults.subagents.maxSpawnDepth = 1;
 
+    // Cost-safety: OpenClaw memory-core Dreaming defaults to an automatic 03:00
+    // sweep whose light/deep/REM diary phases can invoke background model calls.
+    // Jarvis memory/search remains enabled; only scheduled model-backed Dreaming
+    // is disabled unless Salem explicitly decides to re-enable it later.
+    cfg.plugins ??= {};
+    cfg.plugins.entries ??= {};
+    cfg.plugins.entries["memory-core"] ??= {};
+    cfg.plugins.entries["memory-core"].config ??= {};
+    cfg.plugins.entries["memory-core"].config.dreaming ??= {};
+    cfg.plugins.entries["memory-core"].config.dreaming.enabled = false;
+
     const outputCaps = {
       // 32k is the standard request envelope for reasoning seats. It avoids
       // pathological 128k-440k affordability checks while preserving ample
