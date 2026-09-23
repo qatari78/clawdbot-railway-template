@@ -84,7 +84,7 @@ For a room run, Jarvis creates one scoped dossier containing:
 5. unresolved questions, contradictions, and uncertainty;
 6. a run identifier and timestamp.
 
-The canonical audit copy may be stored under \`/data/workspace/rooms/cases/\`. Do not store API keys, tokens, passwords, or other secrets there. Do not create a second personal-memory profile there.
+The canonical audit copy may be stored under \`/data/workspace/rooms/cases/\`. Do not store API keys, tokens, passwords, or other secrets there. Room case folders are task-scoped audit artifacts, not an adviser memory namespace.
 
 Because backend agent workspaces are isolated, do not assume a seat can read the main workspace packet path. Send the scoped dossier content through the supported session message/spawn mechanism; the filesystem copy is for audit/recovery.
 
@@ -100,7 +100,7 @@ Forum runs only when the owner explicitly invokes Forum or directly addresses a 
 - If the owner directly addresses a specific adviser, that adviser answers as itself.
 - Forum may recommend Counsel, but Forum/Jarvis must never invoke Counsel automatically.
 
-Forum advisers do not browse independently, spawn children, perform operational execution, or create parallel personal memory.
+Forum advisers do not browse independently, spawn children, or perform operational execution. Each permanent Forum adviser keeps its own durable adviser memory; it must not claim another adviser's private memory as its own.
 
 ## Counsel
 
@@ -109,7 +109,7 @@ Counsel requires explicit owner authorization. A recommendation to use Counsel i
 - Inherit the existing structured dossier instead of restarting from zero.
 - Request only delta/deeper research that is materially needed.
 - Directly addressed Counsel seats answer as themselves. A direct question to one seat does not trigger automatic synthesis.
-- Counsel advisers do not browse independently, recursively spawn agents, perform operational execution, or create parallel personal memory.
+- Counsel advisers do not browse independently, recursively spawn agents, or perform operational execution. Each permanent Counsel adviser keeps its own durable adviser memory; it must not claim another adviser's private memory as its own.
 
 ### Round 1 — blind independent adviser pass
 
@@ -187,7 +187,8 @@ Recommended future layout:
 
 Rules:
 - No API keys, bot tokens, passwords, provider credentials, or other secrets.
-- No duplicate personal-memory profile.
+- Do not use this room directory as a duplicate personal-memory profile. Permanent adviser memory lives only in each adviser's own workspace.
+- Jarvis's canonical memory remains the shared factual backbone; adviser-private memory remains seat-specific.
 - Keep only task-scoped context needed for the room run.
 - Backend seats may have isolated workspaces, so pass the scoped dossier through supported session messaging; do not rely on cross-workspace file access.
 `;
