@@ -188,7 +188,7 @@ function permissionTemplate(agentClass, requestedTools) {
   if (agentClass === "adviser") {
     if (requestedTools.length) fail("Adviser class does not accept custom tools");
     return {
-      allow: ["message", "sessions_send", "session_status"],
+      allow: ["message", "sessions_send", "session_status", "memory_search", "memory_get"],
       deny: [...CORE_DENY, "browser", "web_search", "web_fetch"],
     };
   }
@@ -309,7 +309,9 @@ function writeSeatBootstrap(plan) {
     "",
     "- Class: " + plan.class,
     "- Work only within the task scope supplied by Jarvis or the owner.",
-    "- Do not create or retain a parallel personal profile of the owner.",
+    plan.class === "adviser"
+      ? "- This permanent adviser keeps its own durable adviser memory; Jarvis canonical memory remains the shared factual backbone."
+      : "- Do not create or retain a parallel personal profile of the owner.",
     "- Do not request or store API keys, passwords, bot tokens, or provider credentials.",
     "- Do not modify OpenClaw configuration or infrastructure.",
     "- Do not spawn subagents.",
@@ -321,7 +323,9 @@ function writeSeatBootstrap(plan) {
     "",
     "You serve the owner through Jarvis.",
     "Personal context is supplied only when relevant to the scoped task.",
-    "Do not create persistent personal memory unless explicitly designed and approved for this agent.",
+    plan.class === "adviser"
+      ? "This permanent adviser is approved to retain its own adviser-specific durable memory while using Jarvis canonical memory as shared context."
+      : "Do not create persistent personal memory unless explicitly designed and approved for this agent.",
     "",
   ].join("\n");
 
@@ -365,6 +369,21 @@ function applyPlan(planId) {
       allow: plan.tools.allow,
       deny: plan.tools.deny,
     },
+    ...(plan.class === "adviser"
+      ? {
+          memory: {
+            search: {
+              enabled: true,
+              rememberAcrossConversations: true,
+              sources: ["memory", "sessions"],
+              extraPaths: [
+                path.join(workspaceDir(), "MEMORY.md"),
+                path.join(workspaceDir(), "memory"),
+              ],
+            },
+          },
+        }
+      : {}),
   };
 
   cfg.agents.entries.main.subagents ??= {};
@@ -467,7 +486,7 @@ function skillText() {
     "",
     "## Permission classes",
     "",
-    "- adviser: bounded reasoning seat; can report to Jarvis, no filesystem, browser, research, shell, gateway, cron, or child spawning.",
+    "- adviser: bounded reasoning seat with its own durable memory and read-only recall of Jarvis's canonical shared memory; no broad filesystem, browser, research, shell, gateway, cron, or child spawning.",
     "- research: evidence worker; browser/web research only, no filesystem, messaging, shell, gateway, cron, config mutation, or child spawning.",
     "- operator: restricted connector operator. Every connector/tool must be named explicitly in the plan. Wildcards, tool groups, browser, shell, filesystem mutation, gateway, cron, secrets, and child spawning are refused by v1.",
     "",
