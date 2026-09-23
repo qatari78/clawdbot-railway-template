@@ -9,7 +9,7 @@ import httpProxy from "http-proxy";
 import * as tar from "tar";
 import { applyPrivateWorkspaceSeed } from "./private-workspace-seed.js";
 import { installJarvisAgentFactoryV1 } from "./jarvis-agent-factory.js";
-import { runJarvisAgentSmokeV1 } from "./jarvis-agent-smoke.js";
+import { runJarvisAgentSmokeV1 } from "./jarvis-agent-smoke.js";\nimport { applyJarvisAdviserMemoryV1 } from "./jarvis-adviser-memory.js";\nimport { runJarvisAdviserMemoryCommissioningV1 } from "./jarvis-adviser-memory-commissioning.js";
 import { runJarvisSecurityAuditV1 } from "./jarvis-security-audit.js";
 import { runOpenRouterKeyAuditV1 } from "./openrouter-key-audit.js";
 
@@ -288,6 +288,18 @@ function launchJarvisAgentSmokeV1() {
     openclawNode: OPENCLAW_NODE,
   }).catch((err) => {
     console.warn(`[agent-smoke-v1] failed: ${String(err)}`);
+  });
+}
+
+function launchJarvisAdviserMemoryCommissioningV1() {
+  void runJarvisAdviserMemoryCommissioningV1({
+    workspaceDir: WORKSPACE_DIR,
+    configPath: configPath(),
+    runCmd,
+    clawArgs,
+    openclawNode: OPENCLAW_NODE,
+  }).catch((err) => {
+    console.warn(`[adviser-memory-test-v1] failed: ${String(err)}`);
   });
 }
 
@@ -1771,16 +1783,17 @@ function applyJarvisOperationalDefaults() {
     cfg.agents.defaults.subagents.maxConcurrent = 4;
     cfg.agents.defaults.subagents.maxSpawnDepth = 1;
 
-    // Cost-safety: OpenClaw memory-core Dreaming defaults to an automatic 03:00
-    // sweep whose light/deep/REM diary phases can invoke background model calls.
-    // Jarvis memory/search remains enabled; only scheduled model-backed Dreaming
-    // is disabled unless Salem explicitly decides to re-enable it later.
+    // Permanent-team memory consolidation. One managed Memory Core sweep covers
+    // the primary Jarvis workspace plus configured adviser workspaces without
+    // mixing one adviser's private transcript corpus into another's.
     cfg.plugins ??= {};
     cfg.plugins.entries ??= {};
     cfg.plugins.entries["memory-core"] ??= {};
     cfg.plugins.entries["memory-core"].config ??= {};
     cfg.plugins.entries["memory-core"].config.dreaming ??= {};
-    cfg.plugins.entries["memory-core"].config.dreaming.enabled = false;
+    cfg.plugins.entries["memory-core"].config.dreaming.enabled = true;
+    cfg.plugins.entries["memory-core"].config.dreaming.timezone = "Asia/Qatar";
+    cfg.plugins.entries["memory-core"].config.dreaming.frequency = "0 3 * * *";
     cfg.plugins.entries["lobster"] ??= {};
     cfg.plugins.entries["lobster"].enabled = true;
 
@@ -1839,6 +1852,10 @@ function applyJarvisOperationalDefaults() {
         "exec", "process", "read", "write", "edit", "apply_patch",
       ]));
     }
+
+    // Reconcile per-seat private memory, shared Jarvis backbone indexing, Active
+    // Memory recall, and the ambient system owner used by the team-wide dream sweep.
+    applyJarvisAdviserMemoryV1({ cfg, mainWorkspaceDir: WORKSPACE_DIR });
 
     // One-line, non-secret policy diagnostic for the v2026.3.8 tool resolver.
     // Safe to keep: it reports only profile/allow/alsoAllow/deny names.
@@ -1942,7 +1959,7 @@ function applyJarvisOperationalDefaults() {
           "- Research: quick uses one researcher; standard uses at most two. Do not duplicate browsing across advisers. Deep follow-up is targeted to unresolved gaps only.",
           "- Never poll sessions_list or sessions_history in a loop waiting for completion. Use the supported wait/yield/completion path once.",
           "- One failed room/model call gets at most one changed-method retry. Do not create replacement-agent herds.",
-          "- Background learning/review is off. Use Skill Workshop only on explicit owner request.",
+          "- Automatic Memory Core Dreaming is enabled for permanent memory consolidation. Skill Workshop autonomous review remains off and is used only on explicit owner request.",
           "- Do not impose Jarvis-specific output-token ceilings. Let each provider/model use its native output and reasoning capacity.",
           "- Large artifacts may use the model/provider native capacity. Financial control belongs at the prepaid OpenRouter balance; behavioral safety comes from loop, recursion, concurrency, and tool-policy controls.",
           "",
@@ -1953,10 +1970,12 @@ function applyJarvisOperationalDefaults() {
         const oldPolicyLines = [
           "- The standard model request envelope is 32k. Treat it as an admission/reasoning envelope, not a spend throttle; actual usage is metered from generated tokens.",
           "- Large artifacts should normally be written coherently in sections/files. Raise the per-job ceiling above 32k only when the requested deliverable genuinely benefits from one-shot generation; never restore 128k+ as the global default.",
+          "- Background learning/review is off. Use Skill Workshop only on explicit owner request.",
         ];
         const newPolicyLines = [
           "- Do not impose Jarvis-specific output-token ceilings. Let each provider/model use its native output and reasoning capacity.",
           "- Large artifacts may use the model/provider native capacity. Financial control belongs at the prepaid OpenRouter balance; behavioral safety comes from loop, recursion, concurrency, and tool-policy controls.",
+          "- Automatic Memory Core Dreaming is enabled for permanent memory consolidation. Skill Workshop autonomous review remains off and is used only on explicit owner request.",
         ];
         let changed = false;
         for (let i = 0; i < oldPolicyLines.length; i += 1) {
@@ -2057,6 +2076,7 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
       launchOpenRouterKeyAuditV1();
       launchJarvisSecurityAuditV1();
       launchJarvisAgentSmokeV1();
+      launchJarvisAdviserMemoryCommissioningV1();
     } catch (err) {
       console.error(`[wrapper] gateway failed to start at boot: ${String(err)}`);
       // Railway can briefly overlap old/new containers on the same persistent volume.
@@ -2070,6 +2090,7 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
           clearInterval(gatewayRetryTimer);
           launchJarvisSecurityAuditV1();
           launchJarvisAgentSmokeV1();
+      launchJarvisAdviserMemoryCommissioningV1();
         } catch (retryErr) {
           console.warn(`[wrapper] gateway retry not ready yet: ${String(retryErr)}`);
         }
