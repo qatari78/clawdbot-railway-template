@@ -1704,25 +1704,23 @@ function applyJarvisOperationalDefaults() {
     cfg.plugins.entries["memory-core"].config.dreaming ??= {};
     cfg.plugins.entries["memory-core"].config.dreaming.enabled = false;
 
-    const outputCaps = {
-      // 32k is the standard request envelope for reasoning seats. It avoids
-      // pathological 128k-440k affordability checks while preserving ample
-      // room for reasoning + visible answer. It is not a spend throttle:
-      // providers bill actual generated tokens, not this ceiling.
-      "openrouter/openai/gpt-5.6-sol": 32768,
-      "openrouter/anthropic/claude-fable-5.1": 32768,
-      "openrouter/anthropic/claude-sonnet-5": 32768,
-      "openrouter/x-ai/grok-4.7": 32768,
-      "openrouter/google/gemini-3.8-flash": 32768,
-    };
-    for (const [modelRef, maxTokens] of Object.entries(outputCaps)) {
-      const current = cfg.agents.defaults.models[modelRef];
-      const modelCfg = current && typeof current === "object" && !Array.isArray(current)
-        ? current
-        : {};
-      modelCfg.params ??= {};
-      modelCfg.params.maxTokens = maxTokens;
-      cfg.agents.defaults.models[modelRef] = modelCfg;
+    // Capability policy: do not impose Jarvis-specific output-token ceilings.
+    // Let each provider/model use its native output/reasoning capacity. Financial
+    // control lives at OpenRouter/prepaid credit; structural safeguards below
+    // still bound recursion, concurrency, and tool loops.
+    for (const modelRef of [
+      "openrouter/openai/gpt-5.6-sol",
+      "openrouter/anthropic/claude-fable-5.1",
+      "openrouter/anthropic/claude-sonnet-5",
+      "openrouter/x-ai/grok-4.7",
+      "openrouter/google/gemini-3.8-flash",
+    ]) {
+      const modelCfg = cfg.agents.defaults.models[modelRef];
+      if (!modelCfg || typeof modelCfg !== "object" || Array.isArray(modelCfg)) continue;
+      if (modelCfg.params && typeof modelCfg.params === "object") {
+        delete modelCfg.params.maxTokens;
+        if (Object.keys(modelCfg.params).length === 0) delete modelCfg.params;
+      }
     }
 
     // Forum/Counsel advisers should return text, not orchestrate more work.
