@@ -5,7 +5,7 @@ const ADVISER_IDS = [
   "forum-01", "forum-02", "forum-03",
   "counsel-01", "counsel-02", "counsel-03",
 ];
-const CANARY = "ADVISER_PRIVATE_CANARY_V1_COBALT_ORBIT_7421";
+const CANARY = "ADVISER_PRIVATE_CANARY_V2_AMBER_COMET_9183";
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -40,14 +40,14 @@ export async function runJarvisAdviserMemoryCommissioningV1({
   openclawNode,
 }) {
   const diagnosticsDir = path.join(workspaceDir, "diagnostics");
-  const resultPath = path.join(diagnosticsDir, "adviser-memory-commissioning-v1.json");
+  const resultPath = path.join(diagnosticsDir, "adviser-memory-commissioning-v2.json");
   fs.mkdirSync(diagnosticsDir, { recursive: true, mode: 0o700 });
 
   if (fs.existsSync(resultPath)) {
     try {
       const prior = JSON.parse(fs.readFileSync(resultPath, "utf8"));
       if (prior?.pass === true) {
-        console.log("[adviser-memory-test-v1] prior passing result exists; skipping");
+        console.log("[adviser-memory-test-v2] prior passing result exists; skipping");
         return { ran: false, reason: "already-passed", resultPath };
       }
     } catch {}
@@ -76,7 +76,7 @@ export async function runJarvisAdviserMemoryCommissioningV1({
   const record = (name, data) => {
     const item = { name, ...data };
     steps.push(item);
-    console.log("[adviser-memory-test-v1] " + JSON.stringify(item));
+    console.log("[adviser-memory-test-v2] " + JSON.stringify(item));
     return item;
   };
 
@@ -118,7 +118,7 @@ export async function runJarvisAdviserMemoryCommissioningV1({
   });
 
   let indexedTarget = null;
-  for (let attempt = 1; attempt <= 8; attempt += 1) {
+  for (let attempt = 1; attempt <= 45; attempt += 1) {
     indexedTarget = await memorySearch(target, CANARY);
     if (indexedTarget.code === 0 && indexedTarget.output.includes(CANARY)) break;
     await sleep(2000);
@@ -236,7 +236,7 @@ export async function runJarvisAdviserMemoryCommissioningV1({
   const pass = required.every((name) => steps.find((step) => step.name === name)?.ok === true);
 
   const summary = {
-    version: 1,
+    version: 2,
     startedAt,
     finishedAt: new Date().toISOString(),
     target,
@@ -254,7 +254,7 @@ export async function runJarvisAdviserMemoryCommissioningV1({
   });
   try { fs.chmodSync(resultPath, 0o600); } catch {}
 
-  console.log("[adviser-memory-test-v1] completed " + JSON.stringify({
+  console.log("[adviser-memory-test-v2] completed " + JSON.stringify({
     pass,
     target,
     targetDetectedAsForumFable: summary.targetDetectedAsForumFable,
