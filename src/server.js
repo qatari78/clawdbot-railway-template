@@ -777,33 +777,20 @@ function runCmd(cmd, args, opts = {}) {
 async function ensureJarvisLobsterV1() {
   if (!isConfigured()) return { ok: false, reason: "not-configured" };
 
-  const markerDir = path.join(STATE_DIR, "jarvis");
-  const markerPath = path.join(markerDir, "lobster-v1.installed");
   const workflowDir = path.join(WORKSPACE_DIR, "workflows");
   const workflowPath = path.join(workflowDir, "jarvis-health-v1.lobster");
+  const duplicateExternalPath = path.join(STATE_DIR, "extensions", "lobster");
 
   try {
-    fs.mkdirSync(markerDir, { recursive: true, mode: 0o700 });
-    fs.mkdirSync(workflowDir, { recursive: true, mode: 0o700 });
-
-    if (!fs.existsSync(markerPath)) {
-      console.log("[lobster-v1] installing official @openclaw/lobster plugin...");
-      const install = await runCmd(
-        OPENCLAW_NODE,
-        clawArgs(["plugins", "install", "@openclaw/lobster"]),
-        { timeoutMs: 180_000 },
-      );
-      const alreadyInstalled = /already installed|already exists/i.test(String(install.output || ""));
-      if (install.code !== 0 && !alreadyInstalled) {
-        console.warn("[lobster-v1] install failed (continuing): " + redactSecrets(String(install.output || "")).slice(-2000));
-        return { ok: false, reason: "install-failed" };
-      }
-      fs.writeFileSync(markerPath, new Date().toISOString() + "\n", { encoding: "utf8", mode: 0o600 });
-      console.log("[lobster-v1] official plugin installed");
-    } else {
-      console.log("[lobster-v1] install marker present; skipping package install");
+    // OpenClaw v2026.9.5 already ships Lobster as a bundled extension.
+    // Remove the accidental external duplicate created by the earlier install
+    // attempt so the bundled, version-matched plugin remains authoritative.
+    if (fs.existsSync(duplicateExternalPath)) {
+      fs.rmSync(duplicateExternalPath, { recursive: true, force: true });
+      console.log("[lobster-v1] removed duplicate external extension; using bundled Lobster");
     }
 
+    fs.mkdirSync(workflowDir, { recursive: true, mode: 0o700 });
     const workflow = [
       "name: jarvis-health-v1",
       "steps:",
@@ -814,8 +801,8 @@ async function ensureJarvisLobsterV1() {
       "",
     ].join("\n");
     fs.writeFileSync(workflowPath, workflow, { encoding: "utf8", mode: 0o600 });
-    console.log("[lobster-v1] read-only health workflow installed");
-    return { ok: true, workflowPath };
+    console.log("[lobster-v1] bundled plugin selected; read-only health workflow installed");
+    return { ok: true, mode: "bundled", workflowPath };
   } catch (err) {
     console.warn("[lobster-v1] setup failed (continuing): " + String(err));
     return { ok: false, reason: "exception" };
@@ -1796,6 +1783,19 @@ function applyJarvisOperationalDefaults() {
     cfg.plugins.entries["memory-core"].config.dreaming.enabled = false;
     cfg.plugins.entries["lobster"] ??= {};
     cfg.plugins.entries["lobster"].enabled = true;
+
+    // The runtime already bundles Lobster. Remove install metadata/load paths
+    // from the accidental external duplicate so the bundled plugin is authoritative.
+    if (cfg.plugins.installs && typeof cfg.plugins.installs === "object") {
+      delete cfg.plugins.installs.lobster;
+      if (Object.keys(cfg.plugins.installs).length === 0) delete cfg.plugins.installs;
+    }
+    if (cfg.plugins.load?.paths && Array.isArray(cfg.plugins.load.paths)) {
+      const duplicatePath = path.join(STATE_DIR, "extensions", "lobster");
+      cfg.plugins.load.paths = cfg.plugins.load.paths.filter((p) => String(p) !== duplicatePath);
+      if (cfg.plugins.load.paths.length === 0) delete cfg.plugins.load.paths;
+      if (cfg.plugins.load && Object.keys(cfg.plugins.load).length === 0) delete cfg.plugins.load;
+    }
 
     // Capability policy: do not impose Jarvis-specific output-token ceilings.
     // Let each provider/model use its native output/reasoning capacity. Financial
