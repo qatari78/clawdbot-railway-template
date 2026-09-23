@@ -9,7 +9,9 @@ import httpProxy from "http-proxy";
 import * as tar from "tar";
 import { applyPrivateWorkspaceSeed } from "./private-workspace-seed.js";
 import { installJarvisAgentFactoryV1 } from "./jarvis-agent-factory.js";
-import { runJarvisAgentSmokeV1 } from "./jarvis-agent-smoke.js";\nimport { applyJarvisAdviserMemoryV1 } from "./jarvis-adviser-memory.js";\nimport { runJarvisAdviserMemoryCommissioningV1 } from "./jarvis-adviser-memory-commissioning.js";
+import { runJarvisAgentSmokeV1 } from "./jarvis-agent-smoke.js";
+import { applyJarvisAdviserMemoryV1 } from "./jarvis-adviser-memory.js";
+import { runJarvisAdviserMemoryCommissioningV1 } from "./jarvis-adviser-memory-commissioning.js";
 import { runJarvisSecurityAuditV1 } from "./jarvis-security-audit.js";
 import { runOpenRouterKeyAuditV1 } from "./openrouter-key-audit.js";
 
