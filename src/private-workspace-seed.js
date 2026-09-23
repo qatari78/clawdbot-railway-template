@@ -304,8 +304,8 @@ function applyJarvisMultiAgentScaffoldV1(workspaceDir) {
     "# USER.md",
     "",
     "You serve the owner through Jarvis.",
-    "Personal context is supplied only in the scoped task/case packet.",
-    "Do not create or maintain a parallel personal-memory profile.",
+    "Personal context is supplied only when relevant to the scoped task/case packet.",
+    "Permanent adviser seats may retain their own approved adviser-specific durable memory; research workers do not.",
     "",
   ].join("\n");
 
@@ -411,7 +411,7 @@ function applyJarvisMultiAgentScaffoldV1(workspaceDir) {
     configChanged = true;
   }
 
-  const adviserAllow = ["message", "sessions_send", "session_status"];
+  const adviserAllow = ["message", "sessions_send", "session_status", "memory_search", "memory_get"];
   const adviserDeny = [
     "read",
     "sessions_spawn",
@@ -473,6 +473,14 @@ function applyJarvisMultiAgentScaffoldV1(workspaceDir) {
     }
 
     existingSeat.tools ??= {};
+    // OpenClaw rejects allow + alsoAllow in the same agent tool scope. Runtime
+    // policy later converts advisers to profile:minimal + alsoAllow, so the
+    // scaffold must normalize back to its authoritative explicit allowlist
+    // before validation on each boot.
+    if (existingSeat.tools.alsoAllow !== undefined) {
+      delete existingSeat.tools.alsoAllow;
+      configChanged = true;
+    }
     if (JSON.stringify(existingSeat.tools.allow ?? []) !== JSON.stringify(desiredAllow)) {
       existingSeat.tools.allow = desiredAllow;
       configChanged = true;
@@ -529,8 +537,11 @@ function applyJarvisMultiAgentScaffoldV1(workspaceDir) {
       ].filter((value) => typeof value === "string" && value.length > 0);
       for (const secret of secrets) diagnostic = diagnostic.split(secret).join("[REDACTED]");
       console.warn("[multi-agent-v1] candidate validation failed: " + diagnostic.slice(0, 3000));
-      fs.copyFileSync(configBackupPath, configPath);
-      throw new Error("OpenClaw rejected multi-agent scaffold config; restored pre-scaffold config");
+      // Roll back to the exact config read at the start of this invocation.
+      // Never restore the one-time historical seed backup here: that snapshot
+      // can predate later agents/channels/memory changes and cause data loss.
+      fs.writeFileSync(configPath, originalConfigText, { encoding: "utf8", mode: 0o600 });
+      throw new Error("OpenClaw rejected multi-agent scaffold config; restored current pre-mutation config");
     }
   }
 
