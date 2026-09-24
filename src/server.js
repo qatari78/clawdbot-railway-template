@@ -15,6 +15,7 @@ import { runJarvisAdviserMemoryCommissioningV1 } from "./jarvis-adviser-memory-c
 import { runJarvisSecurityAuditV1 } from "./jarvis-security-audit.js";
 import { runOpenRouterKeyAuditV1 } from "./openrouter-key-audit.js";
 import { applyJarvisResearchSystemV1 } from "./jarvis-research-system-v1.js";
+import { applyJarvisSeatConfigV1 } from "./jarvis-seat-config-v1.js";
 
 // Migrate deprecated CLAWDBOT_* env vars → OPENCLAW_* so existing Railway deployments
 // keep working. Users should update their Railway Variables to use the new names.
@@ -1862,6 +1863,9 @@ function applyJarvisOperationalDefaults() {
 
     // Research system v1.1: dedicated stateless Verifier/Scout plus persistent evidence scaffold.
     applyJarvisResearchSystemV1({ cfg, mainWorkspaceDir: WORKSPACE_DIR });
+
+    // Canonical user-selected model occupants/effort levels; Counsel 3 remains dormant until filled.
+    applyJarvisSeatConfigV1({ cfg });
 
     // One-line, non-secret policy diagnostic for the v2026.3.8 tool resolver.
     // Safe to keep: it reports only profile/allow/alsoAllow/deny names.
