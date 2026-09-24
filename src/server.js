@@ -1831,10 +1831,10 @@ function applyJarvisOperationalDefaults() {
       }
     }
 
-    // Forum/Counsel advisers should return text, not orchestrate more work.
-    // An explicit allowlist containing tools unavailable to native subagents
-    // caused prompt-stage failures and retry/fallback churn, so use a minimal
-    // profile and deny even its two built-ins.
+    // Forum/Counsel advisers are reasoning leaves, but Telegram-bound seats
+    // must be able to publish their own messages/artifacts under the seat identity.
+    // Use the minimal profile, keep its outbound message capability, and deny
+    // status/orchestration/research/operator tools.
     const adviserIds = [
       "forum-01", "forum-02", "forum-03",
       "counsel-01", "counsel-02", "counsel-03",
@@ -1848,7 +1848,7 @@ function applyJarvisOperationalDefaults() {
       entry.tools.deny = Array.from(new Set([
         ...(Array.isArray(entry.tools.deny) ? entry.tools.deny : []),
         "session_status", "gateway",
-        "message", "sessions_send", "sessions_spawn", "sessions_list",
+        "sessions_send", "sessions_spawn", "sessions_list",
         "sessions_history", "sessions_search", "sessions_yield", "subagents",
         "browser", "web_search", "web_fetch", "skill_workshop",
         "exec", "process", "read", "write", "edit", "apply_patch",
@@ -1956,7 +1956,7 @@ function applyJarvisOperationalDefaults() {
           "- Treat model calls like metered utility flow: every call must produce useful work for the owner.",
           "- For stable Forum/Counsel seats, prefer sessions_send to agent:<seat-id>:main; do not sessions_spawn those seats for ordinary room turns, greetings, checks, or short advice.",
           "- Directly addressed seat: one adviser call, no automatic synthesis.",
-          "- Forum 'everyone': at most three adviser calls plus one Jarvis synthesis. No research for greetings/check-ins. A second adviser round requires a material contradiction/gap or an explicit owner request.",
+          "- Forum 'everyone': at most three independent adviser calls plus one fresh forum-01 synthesis. Jarvis prepares/orchestrates but is not the final Forum synthesizer. No research for greetings/check-ins. A second adviser round requires a material contradiction/gap or an explicit owner request.",
           "- Counsel 'everyone': at most three independent seat calls plus one Counsel-01 synthesis. Do not silently substitute another model for a failed named seat; report the seat unavailable unless the owner asks for a fallback.",
           "- Research: quick uses one researcher; standard uses at most two. Do not duplicate browsing across advisers. Deep follow-up is targeted to unresolved gaps only.",
           "- Never poll sessions_list or sessions_history in a loop waiting for completion. Use the supported wait/yield/completion path once.",
