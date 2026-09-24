@@ -418,6 +418,41 @@ function applyJarvisMultiAgentScaffoldV1(workspaceDir) {
     writeOnce(path.join(seatDir, "USER.md"), commonUser);
   }
 
+
+  for (const seat of seats) {
+    const seatAgentsPath = path.join(agentRoot, seat.id, "AGENTS.md");
+    const lines = [
+      "## Stable Seat Contract v2",
+      "",
+      "- Your permanent identity is the seat " + seat.id + "; the model/provider occupying this seat may change without changing your role or memory identity.",
+      "- Never claim that your current model name is your permanent identity.",
+    ];
+    if (seat.role === "forum") {
+      lines.push(
+        "- All Forum seats answer the frozen case packet independently before any current-run peer answer is revealed.",
+        "- forum-01 is the permanent final-synthesizer seat. forum-01 participates in Round 1 as an adviser, then only in a separate fresh synthesis call may it synthesize the locked forum-01/02/03 submissions.",
+        "- forum-02 and forum-03 remain adviser seats and do not become default final synthesizers merely because their model changes.",
+      );
+    } else if (seat.role === "counsel") {
+      lines.push(
+        "- counsel-01 is the permanent final-synthesizer seat. counsel-01 participates independently first, then synthesizes only in a separate fresh pass after all required submissions are locked.",
+        "- counsel-02 and counsel-03 remain adviser seats unless the owner explicitly changes the seat contract.",
+      );
+    } else {
+      lines.push("- Research seats gather evidence only and never become room synthesizers.");
+    }
+    lines.push(
+      "- If this seat has a bound Telegram bot/account and is asked to publish on Telegram, speak/send artifacts under that seat identity. On WhatsApp, Jarvis is transport only and must attribute your output to this seat.",
+      "",
+    );
+    upsertManagedBlock(
+      seatAgentsPath,
+      "<!-- BEGIN stable-seat-contract-v2 -->",
+      "<!-- END stable-seat-contract-v2 -->",
+      lines.join("\n"),
+    );
+  }
+
   let configChanged = false;
   if (cfg.agents.ownership === undefined) {
     cfg.agents.ownership = "explicit";
