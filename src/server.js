@@ -14,6 +14,7 @@ import { applyJarvisAdviserMemoryV1 } from "./jarvis-adviser-memory.js";
 import { runJarvisAdviserMemoryCommissioningV1 } from "./jarvis-adviser-memory-commissioning.js";
 import { runJarvisSecurityAuditV1 } from "./jarvis-security-audit.js";
 import { runOpenRouterKeyAuditV1 } from "./openrouter-key-audit.js";
+import { applyJarvisResearchSystemV1 } from "./jarvis-research-system-v1.js";
 
 // Migrate deprecated CLAWDBOT_* env vars → OPENCLAW_* so existing Railway deployments
 // keep working. Users should update their Railway Variables to use the new names.
@@ -1858,6 +1859,9 @@ function applyJarvisOperationalDefaults() {
     // Reconcile per-seat private memory, shared Jarvis backbone indexing, Active
     // Memory recall, and the ambient system owner used by the team-wide dream sweep.
     applyJarvisAdviserMemoryV1({ cfg, mainWorkspaceDir: WORKSPACE_DIR });
+
+    // Research system v1.1: dedicated stateless Verifier/Scout plus persistent evidence scaffold.
+    applyJarvisResearchSystemV1({ cfg, mainWorkspaceDir: WORKSPACE_DIR });
 
     // One-line, non-secret policy diagnostic for the v2026.3.8 tool resolver.
     // Safe to keep: it reports only profile/allow/alsoAllow/deny names.
