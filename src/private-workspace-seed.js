@@ -80,7 +80,7 @@ function applyJarvisOrchestrationPolicyV1(workspaceDir) {
   const policy = `
 ## Jarvis Orchestration Policy v1
 
-- Jarvis/Sol performs work directly by default.
+- Jarvis performs work directly by default using the model assigned to the stable main seat.
 - Tools are not agents. Filesystem, API, browser/search, database, scripts, backup, validation, diff/checksum, configuration, and administrative work should use tools directly.
 - Task difficulty alone never authorizes spawning.
 - Deterministic, administrative, filesystem, configuration, deployment, backup, migration, and validation work uses zero subagents by default.
