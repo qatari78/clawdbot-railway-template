@@ -57,7 +57,8 @@ Long research or room work should be delegated to backend sessions so the main J
 
 Use only the already-installed stable agent IDs:
 - Forum advisers: \`forum-01\`, \`forum-02\`, \`forum-03\`
-- Counsel advisers: \`counsel-01\`, \`counsel-02\`, \`counsel-03\`
+- Active Counsel advisers: \`counsel-01\`, \`counsel-02\`
+- \`counsel-03\` is intentionally OPEN and must not be dispatched until the owner fills/activates it.
 - Research workers: \`research-01\`, \`research-02\`
 
 Model/provider assignments are replaceable occupants. Do not encode a provider/model name into room logic.
@@ -66,13 +67,18 @@ Use the runtime's supported session/delegation tools and their current schemas. 
 
 ## Research routing
 
-Centralize evidence gathering so advisers do not each browse independently.
+Use Jarvis Research System v1.1 as the shared evidence service for both rooms.
 
-- Quick: use \`research-01\`.
-- Standard: use \`research-01\` and \`research-02\` independently on the same scoped research question.
-- Deep: use both researchers, then issue only targeted gap/contradiction follow-up when the first evidence packets show a material need.
+- None: reasoning/writing where current factual investigation is unnecessary.
+- Lookup: one or two checkable facts through the read-only lookup path.
+- Verifier-only: one specific document or source.
+- Dual (default whenever a room question needs research): run \`research-01\` (Verifier) and \`research-02\` (Scout) concurrently and independently on the same de-identified neutral brief. They must not see each other's work, earlier conclusions, adviser views, or a shared sub-question plan.
+- Heavy: run both with deeper budgets for high stakes, exhaustive maps, multiple long documents, or unresolved material contradictions.
+- Primary researchers are stateless: skills and shared evidence/cache persist; personal researcher memory does not.
 
-Researchers return evidence, dates, links/citations, contradictions, and uncertainty. They do not make the final recommendation, perform operational actions, modify configuration, or spawn children.
+Research output goes to the append-only evidence ledger and compact active dossier. Researchers return typed evidence, dates, citations/locators, source lineage, contradictions, uncertainty, and open questions. They do not make the final recommendation, perform operational actions, modify configuration, or spawn children.
+
+Adviser gaps go through the Research Gap Service: verify/read-document -> Verifier; find-missing/find-contrary/enumerate -> Scout; social -> X helper; calculate -> deterministic computation from verified ledger claims. Check the ledger before new research.
 
 ## Shared case packet
 
@@ -119,14 +125,14 @@ Counsel requires explicit owner authorization. A recommendation to use Counsel i
 - Inherit the existing structured dossier instead of restarting from zero.
 - Request only delta/deeper research that is materially needed.
 - Directly addressed Counsel seats answer as themselves. A direct question to one seat does not trigger automatic synthesis.
-- Counsel advisers do not browse independently, recursively spawn agents, or perform operational execution. Each permanent Counsel adviser keeps its own durable adviser memory; it must not claim another adviser's private memory as its own.
+- Counsel advisers do not receive unrestricted browser/web tools, recursively spawn agents, or perform operational execution. Opus/Astra may steer bounded evidence_search/evidence_fetch through the shared Research Gap Service; resulting evidence is written to the common ledger. Each permanent Counsel adviser keeps its own durable adviser memory and must not claim another adviser's private memory as its own.
 
 ### Round 1 — blind independent adviser pass
 
-For a substantive full-Counsel run, use all three configured Counsel seats unless the owner explicitly narrows participation.
+For a substantive full-Counsel run, use every active Counsel seat unless the owner explicitly narrows participation. Counsel 3 must not run while it is intentionally OPEN.
 
 - \`counsel-01\` participates as an adviser in Round 1; it is not merely a referee.
-- Give \`counsel-01\`, \`counsel-02\`, and \`counsel-03\` the same frozen case/evidence packet.
+- Give every active Counsel seat the same frozen dossier/evidence packet. Never dispatch an OPEN seat.
 - Each seat must answer without receiving any other seat's current-run answer.
 - Do not enrich a later seat prompt with an earlier seat's output. First-round order must not create informational advantage.
 - Lock all first-round answers before exposing any of them to another seat or publishing them as room voices.
@@ -173,10 +179,10 @@ When the active surface is WhatsApp and multiple room voices are exposed:
 - This is presentation only; keep the single Jarvis WhatsApp identity and stable backend seat IDs.
 ## Cost and quality guardrails
 
-Do not invent numeric spend thresholds.
+- Do not impose Jarvis-specific dollar spending caps or output-token ceilings. The owner's prepaid balance is the financial guardrail.
+- Use search-count, page-read, wall-clock and loop breakers only to stop pathological loops, not to cheapen normal research.
 - Avoid duplicate inference and duplicate browsing first.
 - Preserve Jarvis intelligence rather than silently downgrading the primary model.
-- Any material spend-limit increase requires owner approval.
 - Any routing change that materially reduces quality requires owner approval.
 - New model/provider assignments belong in replaceable seat configuration, not in this skill.
 
