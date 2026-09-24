@@ -160,7 +160,7 @@ Peer review happens only after all first-round answers are locked.
 
 - Stable seat IDs are the canonical identities. Current model/provider names are replaceable occupant metadata and must never be encoded as the identity or orchestration role.
 - Telegram bindings are seat-level bindings. Swapping the model behind a seat must not require changing that seat's Telegram bot/account binding.
-- On Telegram, when a participating adviser seat has its own bound Telegram bot/account, that seat publishes its own adviser output directly under that Telegram identity. Jarvis must not re-voice the same output as though Jarvis authored it.
+- On Telegram, when a participating adviser seat has its own bound Telegram bot/account, that seat publishes its own adviser output directly under that Telegram identity using the Telegram accountId that matches the stable seat ID. Jarvis must not re-voice the same output as though Jarvis authored it.
 - On Telegram, forum-01 publishes the final Forum synthesis and Forum synthesis artifacts directly under the forum-01 Telegram identity; counsel-01 does the same for Counsel.
 - If a required Telegram seat has not yet been bound to a bot/account, do not impersonate it. The backend seat may still run, but disclose that direct Telegram delivery for that seat is pending.
 - On WhatsApp, the single linked identity remains Jarvis. Jarvis transports room outputs, but attributes each adviser message and final synthesis to the permanent seat that authored it. Transport through Jarvis does not make Jarvis the intellectual author.
