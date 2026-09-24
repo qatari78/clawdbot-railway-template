@@ -207,7 +207,7 @@ function applyJarvisWhatsAppRoomsV1(workspaceDir) {
 - A WhatsApp group whose title/metadata identifies it as Counsel is a persistent Counsel surface. Owner messages in that group are Counsel turns by default and count as explicit owner invocation of Counsel.
 - The single linked WhatsApp identity remains Jarvis. Do not impersonate multiple WhatsApp accounts or claim that backend advisers are separate WhatsApp participants.
 - When exposing individual room voices, label the permanent seat first: [JARVIS], [FORUM 1], [FORUM 2], [FORUM 3], [COUNSEL 1], [COUNSEL 2], [COUNSEL 3]. A current model name may be shown only as secondary metadata resolved from seat configuration; never hard-code a model into room identity or orchestration.
-- If the owner addresses a specific adviser/model, route to that permanent seat and return that seat's own view. If the owner asks everyone, obtain independent room views before synthesis. forum-01 authors the final Forum synthesis; counsel-01 authors the final Counsel synthesis. Jarvis only transports those outputs on WhatsApp.
+- If the owner addresses a specific adviser/model, route to that permanent seat and return that seat's own view. If the owner asks everyone, obtain independent room views. Synthesis is a separate task performed only when requested and may be assigned to any model/seat selected for that run; Jarvis transports the attributed output on WhatsApp.
 - Forum can recommend Counsel but cannot invoke it. Only an owner message in the Counsel group or an explicit owner Counsel command authorizes Counsel.
 - Keep WhatsApp DM, Forum group, and Counsel group as separate conversation sessions. Do not merge their transient chat histories.
 `.trim();
@@ -235,7 +235,7 @@ function applyJarvisWhatsAppRoomsV1(workspaceDir) {
 - Use compact human-facing headers without square brackets. Put the stable seat first, for example *FORUM 1* or *COUNSEL 2*. A current configured model/display alias may be shown secondarily, but the seat label is canonical.
 - Do not hard-code a provider/model into backend room logic. If a seat's configured model changes, update only the human-facing model/display alias shown in the header.
 - A peer-review message, when one exists, is its own WhatsApp message with a compact header such as *COUNSEL 2 · RESPONSE TO COUNSEL 3*.
-- Final synthesis is always a separate WhatsApp message attributed to the permanent synthesizer seat, for example *FORUM · FINAL SYNTHESIS — FORUM 1* or *COUNSEL · FINAL SYNTHESIS — COUNSEL 1*. Current model name is optional secondary metadata.
+- When synthesis is requested, publish it as a separate WhatsApp message and identify the actual synthesizing model/seat for that run. No numbered seat has permanent synthesis authority.
 - Use the supported message tool to send these separate bubbles only after the relevant outputs are locked. When tool-sent bubbles already contain the complete response, use NO_REPLY (or the runtime-equivalent suppression) for the wrapper response so the same content is not duplicated.
 - If the current WhatsApp target cannot be resolved safely, do not guess a recipient. Fall back to the normal single response for that turn and report the rendering limitation.
 - The single linked WhatsApp identity remains Jarvis. Separate bubbles are presentation only; backend advisers are not separate WhatsApp accounts.
@@ -259,9 +259,9 @@ function applyJarvisWhatsAppRoomsV1(workspaceDir) {
     "",
     "- This v3 contract supersedes any conflicting model-specific or Jarvis-synthesis wording in earlier WhatsApp room/rendering, multi-agent routing, or non-revenue-token policies.",
     "- Permanent seat IDs are the canonical identities. Model/provider assignments are replaceable occupants and must never define the room role.",
-    "- Jarvis prepares the scoped case/evidence packet, commissions centralized research, and orchestrates room calls. Jarvis is not the default final Forum or Counsel synthesizer.",
-    "- forum-01 is the permanent Forum final-synthesizer seat; counsel-01 is the permanent Counsel final-synthesizer seat. Each synthesizer first participates independently as an adviser, then performs final synthesis only in a separate fresh call after peer outputs are locked.",
-    "- Telegram: a bound adviser seat speaks and sends its own artifacts under its own Telegram bot/account identity, using the Telegram accountId that matches the stable seat ID. forum-01 publishes the final Forum synthesis/artifact directly; counsel-01 does the same for Counsel. If a seat has no Telegram bot binding yet, do not impersonate it; report direct delivery as pending.",
+    "- Jarvis prepares the scoped case/evidence packet, commissions centralized research, and orchestrates room calls. Synthesis is a separate task only when requested; no numbered seat is inherently the chair or synthesizer.",
+    "- Seat numbers are identity/memory/channel slots only. The synthesis model/seat is selected per run by the active synthesis policy or the owner's explicit instruction and may change without altering any permanent seat.",
+    "- Telegram: a bound adviser seat speaks and sends its own artifacts under its own Telegram bot/account identity, using the Telegram accountId that matches the stable seat ID. If that seat is selected to synthesize a run, it may publish the synthesis/artifact under its own identity. If a non-seat model or Jarvis synthesizes, identify the actual synthesizer and do not impersonate a numbered seat. If a seat has no Telegram bot binding yet, report direct delivery as pending.",
     "- WhatsApp: the single visible identity remains Jarvis. Jarvis transports room messages and artifacts but attributes them to the permanent authoring seat. Jarvis transport does not change intellectual authorship.",
     "- Telegram account bindings belong to seats, not models. A future model swap behind a seat must not require rebinding that seat's Telegram identity.",
     "",
@@ -354,7 +354,7 @@ function applyJarvisMultiAgentScaffoldV1(workspaceDir) {
     "- Do not spawn subagents or do independent browsing/research.",
     "- If evidence is missing, send a concise research request to agent:main:main and continue only with clearly marked assumptions.",
     "- When directly addressed, answer as this seat, not as Jarvis and not as a synthetic consensus.",
-    "- forum-01 is the permanent final-synthesizer seat. forum-01 first answers independently as an adviser, then only in a separate fresh synthesis call may it synthesize the locked Forum submissions. forum-02 and forum-03 do not perform the default final synthesis.",
+    "- No Forum seat is permanently the chair or synthesizer. If this seat is selected to synthesize a run, synthesis is a separate fresh task after peer outputs are locked.",
     "- Operational execution belongs to dedicated operator agents, not Forum advisers.",
     "",
   ].join("\n");
@@ -366,7 +366,7 @@ function applyJarvisMultiAgentScaffoldV1(workspaceDir) {
     "- Never self-invoke Counsel or widen scope beyond the user-authorized Counsel case.",
     "- Use the inherited Forum/case dossier, but challenge it and request delta/deeper research through Jarvis when needed.",
     "- Do not recursively spawn agents or conduct independent web research.",
-    "- Counsel 1 is the final-synthesizer seat; Counsel 2 and Counsel 3 are independent adviser seats.",
+    "- No Counsel seat is permanently the chair or synthesizer. If this seat is selected to synthesize a run, synthesis is a separate fresh task after peer outputs are locked.",
     "- Final synthesis must preserve material disagreements and evidence uncertainty rather than forcing consensus.",
     "- Follow-up questions in Counsel stay within Counsel until the owner explicitly addresses Jarvis or exits Counsel.",
     "",
@@ -430,13 +430,13 @@ function applyJarvisMultiAgentScaffoldV1(workspaceDir) {
     if (seat.role === "forum") {
       lines.push(
         "- All Forum seats answer the frozen case packet independently before any current-run peer answer is revealed.",
-        "- forum-01 is the permanent final-synthesizer seat. forum-01 participates in Round 1 as an adviser, then only in a separate fresh synthesis call may it synthesize the locked forum-01/02/03 submissions.",
-        "- forum-02 and forum-03 remain adviser seats and do not become default final synthesizers merely because their model changes.",
+        "- No Forum seat has permanent chair or synthesis authority. If this seat is selected as synthesizer for a run, use a separate fresh synthesis context after all required adviser outputs are locked.",
+        "- Seat numbering does not imply hierarchy; the synthesis target may change from run to run.",
       );
     } else if (seat.role === "counsel") {
       lines.push(
-        "- counsel-01 is the permanent final-synthesizer seat. counsel-01 participates independently first, then synthesizes only in a separate fresh pass after all required submissions are locked.",
-        "- counsel-02 and counsel-03 remain adviser seats unless the owner explicitly changes the seat contract.",
+        "- No Counsel seat has permanent chair or synthesis authority. If this seat is selected as synthesizer for a run, use a separate fresh synthesis context after all required adviser outputs are locked.",
+        "- Seat numbering does not imply hierarchy; the synthesis target may change from run to run.",
       );
     } else {
       lines.push("- Research seats gather evidence only and never become room synthesizers.");
@@ -653,9 +653,9 @@ function applyJarvisMultiAgentScaffoldV1(workspaceDir) {
     "- Stable backend seats: forum-01/02/03, counsel-01/02/03, research-01/02. Models are replaceable occupants; seat IDs stay stable.",
     "- Direct Jarvis work remains direct-first.",
     "- Research routing: Quick -> research-01; Standard -> research-01 + research-02 independently; Deep -> both, then only targeted gap follow-up if needed.",
-    "- Forum runs only when the owner invokes or addresses Forum. Jarvis builds one shared case/evidence packet and orchestrates the seats. For a full Forum run, forum-01/02/03 answer independently first; after their outputs are locked, forum-01 performs the final synthesis in a separate fresh call. A directly addressed seat answers as itself. Models are replaceable occupants and never define the orchestration role.",
+    "- Forum runs only when the owner invokes or addresses Forum. Jarvis builds one shared case/evidence packet and orchestrates the seats. For a full Forum run, participating seats answer independently first. Synthesis is added only when requested and is assigned separately to the model/seat selected for that run. A directly addressed seat answers as itself. Models are replaceable occupants and seat numbers never define hierarchy.",
     "- Forum may recommend Counsel but must never invoke it.",
-    "- Counsel runs only after explicit owner authorization. It inherits the structured dossier, performs delta/deeper research as needed through research-01/02, obtains independent Counsel views, and counsel-01 is the final-synthesizer seat. Counsel remains conversational for follow-ups.",
+    "- Counsel runs only after explicit owner authorization. It inherits the structured dossier, performs delta/deeper research as needed through research-01/02, and obtains independent Counsel views. Synthesis is added only when requested and is assigned separately to the model/seat selected for that run. Counsel remains conversational for follow-ups.",
     "- Adviser seats do not privately spawn frontier children. Research is centralized through research-01/02.",
     "- Operational jobs are routed to dedicated operator agents to be created separately with owner approval.",
     "- Material spend-limit increases and meaningful quality-reducing routing changes require owner approval. No numeric spend threshold is invented here.",
