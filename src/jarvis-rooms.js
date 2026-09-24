@@ -92,26 +92,23 @@ Because backend agent workspaces are isolated, do not assume a seat can read the
 
 Forum runs only when the owner explicitly invokes Forum or directly addresses a Forum adviser.
 
-- For a substantive full-Forum answer, use all three configured Forum seats unless the owner explicitly narrows participation.
-- Jarvis prepares the shared case/evidence packet, commissions centralized research when needed, and orchestrates the room. Jarvis is not the default final Forum synthesizer.
-- Give forum-01, forum-02, and forum-03 the same frozen scoped case/evidence packet.
+- For a substantive full-Forum run, use all three configured Forum seats unless the owner explicitly narrows participation.
+- Jarvis prepares the shared case/evidence packet, commissions centralized research when needed, and orchestrates the room.
+- Give participating Forum seats the same frozen scoped case/evidence packet.
 - Each participating seat produces an independent first-round adviser answer without seeing another seat's current-run answer.
 - Lock all first-round adviser answers before exposing any of them to another seat or publishing them as room voices.
-- forum-01 participates in Round 1 as a normal adviser; it is not merely a referee.
 - Run at most one cross-review round, and only for a material contradiction/gap or an explicit owner request for debate.
 - If the owner directly addresses a specific adviser, that adviser answers as itself; a direct single-seat question does not automatically trigger full-room synthesis.
 - Forum may recommend Counsel, but Forum/Jarvis must never invoke Counsel automatically.
 
-### Final synthesis — fresh Forum-01 context
+### Synthesis
 
-forum-01 is both a first-round adviser and the default final Forum synthesizer, but those are separate calls.
-
-- After all required first-round answers (and any optional cross-review) are locked, invoke one fresh, isolated, one-shot forum-01 synthesis run rather than continuing forum-01's adviser conversation.
-- The synthesis input contains the original owner question, frozen case/evidence packet, all locked first-round submissions, and any locked cross-review notes.
-- Present forum-01's own first-round submission as one peer submission alongside forum-02 and forum-03; instruct the synthesis pass not to privilege or defend its earlier answer.
+- No Forum seat is permanently the chair, chief, or synthesizer. Seat numbers are identity/memory/channel slots only.
+- Synthesis happens only when the owner requests it or the active room instruction explicitly calls for it.
+- Treat synthesis as a separate model task. Assign it to the model/seat selected for that run by the active synthesis policy or the owner's explicit instruction; do not derive synthesis authority from seat number.
+- When a room participant is used as synthesizer after also advising, use a fresh isolated synthesis context and provide the frozen case/evidence packet plus all locked submissions. Its earlier adviser answer is one peer submission, not privileged.
 - Final synthesis must preserve material disagreements and evidence uncertainty rather than manufacturing consensus.
-- The synthesizer role belongs permanently to the seat forum-01, not to whichever model currently occupies that seat. Model/provider assignments remain replaceable without changing room logic.
-- If the runtime cannot obtain a genuinely fresh forum-01 context, report that limitation instead of falsely claiming an isolated synthesis pass.
+- The synthesizer may change from run to run without changing any permanent seat identity, memory, or Telegram binding.
 
 Forum advisers do not browse independently, spawn children, or perform operational execution. Each permanent Forum adviser keeps its own durable adviser memory; it must not claim another adviser's private memory as its own.
 
@@ -144,16 +141,14 @@ Peer review happens only after all first-round answers are locked.
 - Cross-review should identify disagreements, missed evidence, or changed conclusions; it must not erase genuine dissent merely to create consensus.
 - Do not restart broad research during peer review unless the evidence packet exposes a specific unresolved factual gap.
 
-### Final synthesis — fresh Counsel-01 context
+### Synthesis
 
-\`counsel-01\` is both a first-round adviser and the default final synthesizer, but those are separate calls.
-
-- After the adviser pass (and optional cross-review), invoke one fresh, isolated, one-shot \`counsel-01\` synthesis run rather than continuing the adviser conversation.
-- Use the runtime's supported fresh-session mechanism, normally a one-shot \`sessions_spawn\` targeted to \`counsel-01\` with no child-spawning permission. This transient run is not a new permanent seat.
-- The synthesis input contains the original owner question, frozen evidence/case packet, all locked first-round submissions, and any locked cross-review notes.
-- Present Counsel-01's own first-round submission as one peer submission alongside Counsel-02 and Counsel-03; instruct the synthesizer not to privilege or defend its earlier answer.
+- No Counsel seat is permanently the chair, chief, or synthesizer. Seat numbers are identity/memory/channel slots only.
+- Synthesis happens only when the owner requests it or the active Counsel instruction explicitly calls for it.
+- Treat synthesis as a separate model task. Assign it to the model/seat selected for that run by the active synthesis policy or the owner's explicit instruction; do not derive synthesis authority from seat number.
+- When a Counsel participant is used as synthesizer after also advising, use a fresh isolated synthesis context and provide the frozen dossier, all locked adviser submissions, and any locked cross-review notes. Its earlier adviser answer is one peer submission, not privileged.
 - Final synthesis must preserve material disagreements and evidence uncertainty rather than manufacturing consensus.
-- If the runtime cannot obtain a genuinely fresh Counsel-01 context, do not falsely claim that it did. Report the limitation in the room output rather than silently reusing the adviser context.
+- The synthesizer may change from run to run without changing any permanent seat identity, memory, or Telegram binding.
 - Follow-up questions remain within the Counsel context until the owner exits Counsel or explicitly addresses Jarvis.
 
 ## Channel delivery and seat identity
@@ -161,7 +156,7 @@ Peer review happens only after all first-round answers are locked.
 - Stable seat IDs are the canonical identities. Current model/provider names are replaceable occupant metadata and must never be encoded as the identity or orchestration role.
 - Telegram bindings are seat-level bindings. Swapping the model behind a seat must not require changing that seat's Telegram bot/account binding.
 - On Telegram, when a participating adviser seat has its own bound Telegram bot/account, that seat publishes its own adviser output directly under that Telegram identity using the Telegram accountId that matches the stable seat ID. Jarvis must not re-voice the same output as though Jarvis authored it.
-- On Telegram, forum-01 publishes the final Forum synthesis and Forum synthesis artifacts directly under the forum-01 Telegram identity; counsel-01 does the same for Counsel.
+- On Telegram, if the selected synthesizer is a bound room seat, that seat publishes the synthesis/artifact under its own Telegram identity. If synthesis is performed by a non-seat model or by Jarvis, delivery must clearly identify the actual synthesizer; never attribute synthesis to a numbered seat that did not produce it.
 - If a required Telegram seat has not yet been bound to a bot/account, do not impersonate it. The backend seat may still run, but disclose that direct Telegram delivery for that seat is pending.
 - On WhatsApp, the single linked identity remains Jarvis. Jarvis transports room outputs, but attributes each adviser message and final synthesis to the permanent seat that authored it. Transport through Jarvis does not make Jarvis the intellectual author.
 - Channel choice changes only delivery, never authorship, seat memory, adviser order, or which seat performs final synthesis.
@@ -173,7 +168,7 @@ When the active surface is WhatsApp and multiple room voices are exposed:
 - Publish one adviser voice per WhatsApp message rather than one combined transcript.
 - Use compact headers without square brackets: \`*FORUM 1 · <MODEL>*\` or \`*COUNSEL 1 · <MODEL>*\`.
 - Optional peer-review responses get their own messages.
-- Publish final synthesis as its own message with the permanent synthesizer seat primary, for example: \`*FORUM · FINAL SYNTHESIS — FORUM 1*\` or \`*COUNSEL · FINAL SYNTHESIS — COUNSEL 1*\`. A current model/display alias may appear only as secondary metadata.
+- Publish final synthesis as its own message and identify the actual synthesizing model/seat for that run. Do not imply that any numbered seat has permanent synthesis authority.
 - Use the supported message tool to the same current conversation target, then suppress duplicate wrapper output with \`NO_REPLY\` when supported.
 - This is presentation only; keep the single Jarvis WhatsApp identity and stable backend seat IDs.
 ## Cost and quality guardrails
