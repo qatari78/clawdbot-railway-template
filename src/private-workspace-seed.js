@@ -253,6 +253,26 @@ function applyJarvisWhatsAppRoomsV1(workspaceDir) {
     throw new Error("duplicate Jarvis WhatsApp Room Rendering v2 markers found");
   }
 
+
+  const seatChannelPolicyV3 = [
+    "## Jarvis Seat and Channel Contract v3",
+    "",
+    "- This v3 contract supersedes any conflicting model-specific or Jarvis-synthesis wording in earlier WhatsApp room/rendering or multi-agent routing policies.",
+    "- Permanent seat IDs are the canonical identities. Model/provider assignments are replaceable occupants and must never define the room role.",
+    "- Jarvis prepares the scoped case/evidence packet, commissions centralized research, and orchestrates room calls. Jarvis is not the default final Forum or Counsel synthesizer.",
+    "- forum-01 is the permanent Forum final-synthesizer seat; counsel-01 is the permanent Counsel final-synthesizer seat. Each synthesizer first participates independently as an adviser, then performs final synthesis only in a separate fresh call after peer outputs are locked.",
+    "- Telegram: a bound adviser seat speaks and sends its own artifacts under its own Telegram bot/account identity. forum-01 publishes the final Forum synthesis/artifact directly; counsel-01 does the same for Counsel. If a seat has no Telegram bot binding yet, do not impersonate it; report direct delivery as pending.",
+    "- WhatsApp: the single visible identity remains Jarvis. Jarvis transports room messages and artifacts but attributes them to the permanent authoring seat. Jarvis transport does not change intellectual authorship.",
+    "- Telegram account bindings belong to seats, not models. A future model swap behind a seat must not require rebinding that seat's Telegram identity.",
+    "",
+  ].join("\n");
+  upsertManagedBlock(
+    agentsPath,
+    "<!-- BEGIN jarvis-seat-channel-contract-v3 -->",
+    "<!-- END jarvis-seat-channel-contract-v3 -->",
+    seatChannelPolicyV3,
+  );
+
   console.log("[whatsapp-rooms-v1] group transport enabled and room routing policy verified");
   return { applied: true, backupDir, ownerAllowConfigured: Boolean(ownerAllow) };
 }
