@@ -12,9 +12,9 @@ export async function runJarvisAgentSmokeV1({
   }
 
   const dir = path.join(workspaceDir, "diagnostics");
-  const resultPath = path.join(dir, "room-seat-smoke-v5.json");
+  const resultPath = path.join(dir, "room-seat-smoke-v6.json");
   if (fs.existsSync(resultPath)) {
-    console.log("[agent-smoke-v5] prior result exists; skipping");
+    console.log("[agent-smoke-v6] prior result exists; skipping");
     return { ran: false, reason: "already-ran", resultPath };
   }
 
@@ -63,12 +63,14 @@ export async function runJarvisAgentSmokeV1({
   };
 
   const seats = [
+    ["main", "JARVIS_HI"],
     ["forum-01", "FORUM_01_HI"],
     ["forum-02", "FORUM_02_HI"],
     ["forum-03", "FORUM_03_HI"],
     ["counsel-01", "COUNSEL_01_HI"],
     ["counsel-02", "COUNSEL_02_HI"],
-    ["counsel-03", "COUNSEL_03_HI"],
+    ["research-01", "RESEARCH_VERIFIER_HI"],
+    ["research-02", "RESEARCH_SCOUT_HI"],
   ];
 
   const results = [];
@@ -79,7 +81,7 @@ export async function runJarvisAgentSmokeV1({
   }
 
   const summary = {
-    version: 5,
+    version: 6,
     startedAt,
     finishedAt: new Date().toISOString(),
     seats: results,
