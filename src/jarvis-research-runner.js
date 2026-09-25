@@ -169,8 +169,8 @@ async function callResearch({apiKey,model,researcher,brief,searchEngine,level}){
     }
   };
 }
-export async function runResearchBrief({brief,level="dual"}){
-  if(!["verifier","dual","heavy"].includes(level))throw new Error("level must be verifier, dual, or heavy");
+export async function runResearchBrief({brief,level="dual",ledgerBriefId=null}){
+  if(!["verifier","scout","dual","heavy"].includes(level))throw new Error("level must be verifier, scout, dual, or heavy");
   const p=researchPaths();
   const runId=uuidv7();
   const normalized={...brief};
@@ -187,30 +187,38 @@ export async function runResearchBrief({brief,level="dual"}){
   const verifierSearchEngine=process.env.JARVIS_RESEARCH_VERIFIER_SEARCH_ENGINE?.trim()||"native";
   const scoutSearchEngine=process.env.JARVIS_RESEARCH_SCOUT_SEARCH_ENGINE?.trim()||"perplexity";
 
-  const jobs=[callResearch({apiKey:auth.key,model:verifierModel,researcher:"verifier",brief:normalized,searchEngine:verifierSearchEngine,level})];
+  const jobs=[];
+  if(level!=="scout")jobs.push(callResearch({apiKey:auth.key,model:verifierModel,researcher:"verifier",brief:normalized,searchEngine:verifierSearchEngine,level}));
   if(level!=="verifier")jobs.push(callResearch({apiKey:auth.key,model:scoutModel,researcher:"scout",brief:normalized,searchEngine:scoutSearchEngine,level}));
   const settled=await Promise.allSettled(jobs);
   const failures=[],telemetry=[],packets=[];
   for(const item of settled){
     if(item.status==="rejected"){failures.push(String(item.reason?.message||item.reason));continue;}
     const x=item.value;
+    if(ledgerBriefId&&ledgerBriefId!==normalized.brief_id){
+      x.packet.research_task_id=normalized.brief_id;
+      x.packet.parent_brief_id=ledgerBriefId;
+      x.packet.brief_id=ledgerBriefId;
+    }
     const ingested=ingestResearchPacket(x.packet);
     packets.push(ingested.packet_id);
     telemetry.push(x.telemetry);
   }
   const pass=failures.length===0&&packets.length===jobs.length;
+  const targetBriefId=ledgerBriefId||normalized.brief_id;
   let merge=null,verification=null,semanticVerification=null,dossier=null;
   if(pass){
-    merge=mergeResearchBrief(normalized.brief_id);
-    verification=await verifyResearchSources(normalized.brief_id);
-    semanticVerification=await semanticSupportCheck(normalized.brief_id);
-    dossier=buildResearchDossier(normalized.brief_id);
+    merge=mergeResearchBrief(targetBriefId);
+    verification=await verifyResearchSources(targetBriefId);
+    semanticVerification=await semanticSupportCheck(targetBriefId);
+    dossier=buildResearchDossier(targetBriefId);
   }
   const researchCost=telemetry.reduce((s,x)=>s+Number(x.usage?.cost||0),0);
   const supportCost=Number(semanticVerification?.usage?.cost||0);
   const totalCost=researchCost+supportCost;
   const summary={
-    schema:"jarvis-research-run-v1.1",run_id:runId,brief_id:normalized.brief_id,level,
+    schema:"jarvis-research-run-v1.1",run_id:runId,brief_id:targetBriefId,task_brief_id:normalized.brief_id,level,
+    ledger_brief_id:ledgerBriefId||null,
     started_at:normalized.commissioned_at,finished_at:new Date().toISOString(),pass,failures,
     packets,telemetry,total_cost_usd:totalCost,
     merge:merge?{merge_id:merge.merge_id,source_count:merge.source_count,claim_count:merge.claim_count,contradiction_count:merge.contradiction_count}:null,
@@ -220,12 +228,12 @@ export async function runResearchBrief({brief,level="dual"}){
   };
   const runPath=path.join(p.runs,runId+".json");
   fs.writeFileSync(runPath,JSON.stringify(summary,null,2)+"\n",{encoding:"utf8",mode:0o600});
-  appendEvent("research-run-completed",{run_id:runId,brief_id:normalized.brief_id,level,pass,total_cost_usd:totalCost});
+  appendEvent("research-run-completed",{run_id:runId,brief_id:targetBriefId,task_brief_id:normalized.brief_id,level,pass,total_cost_usd:totalCost});
   return{summary,dossier};
 }
 async function cli(){
   const [cmd,briefPath,levelArg]=process.argv.slice(2);
-  if(cmd!=="run"||!briefPath)throw new Error("Usage: node jarvis-research-runner.js run <brief-json-path> [verifier|dual|heavy]");
+  if(cmd!=="run"||!briefPath)throw new Error("Usage: node jarvis-research-runner.js run <brief-json-path> [verifier|scout|dual|heavy]");
   const brief=JSON.parse(fs.readFileSync(briefPath,"utf8"));
   const result=await runResearchBrief({brief,level:levelArg||brief.research_level||"dual"});
   process.stdout.write(JSON.stringify(result,null,2)+"\n");
