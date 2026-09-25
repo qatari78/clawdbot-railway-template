@@ -516,6 +516,17 @@ function c1WorkspaceFileSizes(root) {
   return files.sort((a, b) => a.path.localeCompare(b.path));
 }
 
+
+function c1ParseCliJson(output) {
+  const text = String(output || "");
+  const first = text.indexOf("{");
+  const last = text.lastIndexOf("}");
+  if (first < 0 || last < first) {
+    throw new Error("no JSON object found");
+  }
+  return JSON.parse(text.slice(first, last + 1));
+}
+
 async function runC1ContextDiagnosticV1() {
   const sessionKey = "agent:main:main";
   const outputName = "c1-context-diagnostic-v1";
@@ -615,10 +626,13 @@ async function runC1ContextDiagnosticV1() {
       return;
     }
 
-    stage = "parse";
+    stage = "parse-manifest";
     const manifest = JSON.parse(fs.readFileSync(path.join(outputDir, "manifest.json"), "utf8"));
+    stage = "parse-branch";
     const branch = JSON.parse(fs.readFileSync(path.join(outputDir, "session-branch.json"), "utf8"));
-    const usagePayload = JSON.parse(usageResult.output || "{}");
+    stage = "parse-usage";
+    const usagePayload = c1ParseCliJson(usageResult.output);
+    stage = "resolve-context-weight";
     const usageSessions = Array.isArray(usagePayload.sessions) ? usagePayload.sessions : [];
     const usageRow =
       usageSessions.find((row) => row?.key === sessionKey) ??
