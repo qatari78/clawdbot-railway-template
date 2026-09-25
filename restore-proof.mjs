@@ -128,33 +128,9 @@ async function captureLiveBackup(key) {
 async function run() {
   const date = new Date().toISOString().split("T")[0];
   const key = process.env.BACKUP_KEY || `openclaw-state-${date}.tar.gz`;
-  const exportToken = process.env.BACKUP_EXPORT_TOKEN || "";
-  const serviceDomain = (process.env.PRIMARY_SERVICE_DOMAIN || "").trim();
 
-  if (!exportToken) throw new Error("BACKUP_EXPORT_TOKEN is not configured");
-  if (!serviceDomain) throw new Error("PRIMARY_SERVICE_DOMAIN is not configured");
-
-  const baseUrl = serviceDomain.includes("://")
-    ? serviceDomain.replace(/\/$/, "")
-    : `http://${serviceDomain}:8080`;
-
-  const response = await fetch(`${baseUrl}/setup/export`, {
-    headers: { Authorization: `Bearer ${exportToken}` },
-    signal: AbortSignal.timeout(120000),
-  });
-  if (!response.ok) throw new Error(`Backup export returned ${response.status}`);
-
-  const exported = new Uint8Array(await response.arrayBuffer());
-  if (exported.byteLength === 0) throw new Error("Live /data export was empty");
-
-  const liveInspection = await inspectTar(exported);
-
-  await s3.send(new PutObjectCommand({
-    Bucket: bucket,
-    Key: key,
-    Body: exported,
-    ContentType: "application/gzip",
-  }));
+  // Manual capture is opt-in only. Normal nightly operation is verification-only.
+  await captureLiveBackup(key);
 
   const obj = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
   const persisted = await bodyToBytes(obj.Body);
@@ -163,15 +139,14 @@ async function run() {
     throw new Error("S3 object length does not match downloaded bytes");
   }
 
-  const persistedInspection = await inspectTar(persisted);
+  const inspected = await inspectTar(persisted);
   return {
     ok: true,
     key,
-    exportedBytes: exported.byteLength,
-    persistedBytes: persisted.byteLength,
-    entries: persistedInspection.entries,
-    topLevels: persistedInspection.topLevels,
-    liveTopLevels: liveInspection.topLevels,
+    bytes: persisted.byteLength,
+    entries: inspected.entries,
+    topLevels: inspected.topLevels,
+    requiredPaths: inspected.requiredPaths,
   };
 }
 
