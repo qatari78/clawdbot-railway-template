@@ -158,7 +158,8 @@ async function callOpenRouterResearch({apiKey,model,researcher,brief,searchEngin
           engine:searchEngine,
           max_results:8,
           max_total_results:32,
-          search_context_size:"medium"
+          search_context_size:"medium",
+          ...(researcher==="verifier" ? {allowed_domains:["openrouter.ai"]} : {})
         }
       },
       {
@@ -169,7 +170,8 @@ async function callOpenRouterResearch({apiKey,model,researcher,brief,searchEngin
         }
       }
     ],
-    max_tool_calls:12,
+    tool_choice:"required",
+    max_tool_calls:8,
     temperature:0.1
   };
 
@@ -205,7 +207,12 @@ async function callOpenRouterResearch({apiKey,model,researcher,brief,searchEngin
   if(packet.researcher!==researcher)throw new Error(researcher+" returned wrong researcher role");
 
   const searchRequests=Number(data?.usage?.server_tool_use?.web_search_requests ?? 0);
-  if(searchRequests<1)throw new Error(researcher+" completed without a web_search server-tool call");
+  const annotationCount=Array.isArray(message?.annotations) ? message.annotations.length : 0;
+  const sourceCount=Array.isArray(packet?.sources) ? packet.sources.length : 0;
+  if(searchRequests<1 && annotationCount<1){
+    throw new Error(researcher+" completed without observable web-search usage or search citations");
+  }
+  if(sourceCount<1)throw new Error(researcher+" returned no research sources");
 
   return {
     packet,
@@ -214,7 +221,8 @@ async function callOpenRouterResearch({apiKey,model,researcher,brief,searchEngin
     model:data?.model??modelSlug(model),
     provider:data?.provider??null,
     search_engine:searchEngine,
-    search_requests:searchRequests
+    search_requests:searchRequests,
+    annotation_count:annotationCount
   };
 }
 
@@ -222,7 +230,7 @@ export async function runJarvisResearchCommissioningV1(){
   if(process.env.JARVIS_RESEARCH_COMMISSION_V1?.trim()!=="1")return{ran:false,reason:"disabled"};
 
   const p=researchPaths();
-  const resultPath=path.join(p.diagnostics,"commission-v1.2-openrouter-server-tools.json");
+  const resultPath=path.join(p.diagnostics,"commission-v1.3-openrouter-server-tools.json");
   if(fs.existsSync(resultPath)){
     try{
       const old=JSON.parse(fs.readFileSync(resultPath,"utf8"));
@@ -250,7 +258,7 @@ export async function runJarvisResearchCommissioningV1(){
   const auth=await resolveOpenRouterKeyForRuntime({stateDir:stateDir(),configPath:configPath()});
   if(!auth.key){
     const summary={
-      version:"v1.2",startedAt:new Date().toISOString(),finishedAt:new Date().toISOString(),
+      version:"v1.3",startedAt:new Date().toISOString(),finishedAt:new Date().toISOString(),
       brief_id:brief.brief_id,pass:false,error:"OpenRouter credential could not be resolved from canonical runtime auth stores.",
       auth_attempts:auth.attempts
     };
@@ -266,30 +274,34 @@ export async function runJarvisResearchCommissioningV1(){
   const runId=uuidv7();
 
   let results=[],error=null;
-  try{
-    const calls=await Promise.all([
-      callOpenRouterResearch({
-        apiKey:auth.key,model:verifierModel,researcher:"verifier",brief,searchEngine:"native"
-      }),
-      callOpenRouterResearch({
-        apiKey:auth.key,model:scoutModel,researcher:"scout",brief,searchEngine:"exa"
-      })
-    ]);
-    for(const x of calls){
-      const ingested=ingestResearchPacket(x.packet);
-      results.push({
-        researcher:x.packet.researcher,
-        packet_id:ingested.packet_id,
-        model:x.model,
-        provider:x.provider,
-        search_engine:x.search_engine,
-        search_requests:x.search_requests,
-        usage:x.usage
-      });
+  const settled=await Promise.allSettled([
+    callOpenRouterResearch({
+      apiKey:auth.key,model:verifierModel,researcher:"verifier",brief,searchEngine:"exa"
+    }),
+    callOpenRouterResearch({
+      apiKey:auth.key,model:scoutModel,researcher:"scout",brief,searchEngine:"perplexity"
+    })
+  ]);
+  const failures=[];
+  for(const item of settled){
+    if(item.status==="rejected"){
+      failures.push(String(item.reason?.message||item.reason));
+      continue;
     }
-  }catch(err){
-    error=String(err?.message||err);
+    const x=item.value;
+    const ingested=ingestResearchPacket(x.packet);
+    results.push({
+      researcher:x.packet.researcher,
+      packet_id:ingested.packet_id,
+      model:x.model,
+      provider:x.provider,
+      search_engine:x.search_engine,
+      search_requests:x.search_requests,
+      annotation_count:x.annotation_count,
+      usage:x.usage
+    });
   }
+  if(failures.length)error=failures.join(" | ");
 
   let merge=null,dossier=null;
   if(!error){
@@ -298,7 +310,7 @@ export async function runJarvisResearchCommissioningV1(){
   }
 
   const summary={
-    version:"v1.2",startedAt,finishedAt:new Date().toISOString(),brief_id:brief.brief_id,run_id:runId,
+    version:"v1.3",startedAt,finishedAt:new Date().toISOString(),brief_id:brief.brief_id,run_id:runId,
     pass:!error&&results.length===2,
     researchers:results,
     error,
