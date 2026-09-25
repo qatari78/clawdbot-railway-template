@@ -230,7 +230,7 @@ export async function runJarvisResearchCommissioningV1(){
   if(process.env.JARVIS_RESEARCH_COMMISSION_V1?.trim()!=="1")return{ran:false,reason:"disabled"};
 
   const p=researchPaths();
-  const resultPath=path.join(p.diagnostics,"commission-v1.3-openrouter-server-tools.json");
+  const resultPath=path.join(p.diagnostics,"commission-v1.4-openrouter-server-tools.json");
   if(fs.existsSync(resultPath)){
     try{
       const old=JSON.parse(fs.readFileSync(resultPath,"utf8"));
@@ -241,8 +241,9 @@ export async function runJarvisResearchCommissioningV1(){
     }catch{}
   }
 
+  const runId=uuidv7();
   const brief={
-    brief_id:"commission-openrouter-server-tools-v1",
+    brief_id:"commission-openrouter-server-tools-"+runId,
     question:"Determine from current public evidence how OpenRouter server-side web search and web fetch work for hosted agentic research: request/tool mechanism, model-controlled multi-step behavior, source/citation return, supported engines/provider behavior, pricing or metering, and material integration constraints.",
     jurisdiction:"global/public product documentation",
     period:"current as of commissioning date",
@@ -258,7 +259,7 @@ export async function runJarvisResearchCommissioningV1(){
   const auth=await resolveOpenRouterKeyForRuntime({stateDir:stateDir(),configPath:configPath()});
   if(!auth.key){
     const summary={
-      version:"v1.3",startedAt:new Date().toISOString(),finishedAt:new Date().toISOString(),
+      version:"v1.4",startedAt:new Date().toISOString(),finishedAt:new Date().toISOString(),
       brief_id:brief.brief_id,pass:false,error:"OpenRouter credential could not be resolved from canonical runtime auth stores.",
       auth_attempts:auth.attempts
     };
@@ -271,12 +272,11 @@ export async function runJarvisResearchCommissioningV1(){
   const verifierModel=process.env.JARVIS_RESEARCH_VERIFIER_MODEL?.trim()||"openrouter/openai/gpt-6-sol";
   const scoutModel=process.env.JARVIS_RESEARCH_SCOUT_MODEL?.trim()||"openrouter/deepseek/deepseek-v4-flash-0731";
   const startedAt=new Date().toISOString();
-  const runId=uuidv7();
 
   let results=[],error=null;
   const settled=await Promise.allSettled([
     callOpenRouterResearch({
-      apiKey:auth.key,model:verifierModel,researcher:"verifier",brief,searchEngine:"exa"
+      apiKey:auth.key,model:verifierModel,researcher:"verifier",brief,searchEngine:"native"
     }),
     callOpenRouterResearch({
       apiKey:auth.key,model:scoutModel,researcher:"scout",brief,searchEngine:"perplexity"
