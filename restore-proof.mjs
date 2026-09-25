@@ -1,6 +1,9 @@
 // Isolated, non-destructive restore verifier.
 import { S3Client, GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
-import { gunzipSync } from "node:zlib";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import * as tar from "tar";
 
 const required = [".openclaw/openclaw.json", "workspace/AGENTS.md"];
 const bucket = process.env.BUCKET;
@@ -33,72 +36,47 @@ async function bodyToBytes(body) {
   return out;
 }
 
-function inspectTar(gzipData) {
-  const tar = gunzipSync(gzipData);
-  let offset = 0;
-  let entries = 0;
-  let configText = null;
-  let agentsText = null;
+async function inspectTar(gzipData) {
+  const tmpPath = path.join(os.tmpdir(), `backup-proof-${process.pid}-${Date.now()}.tar.gz`);
+  fs.writeFileSync(tmpPath, gzipData);
+
+  const seen = new Set();
   const topLevels = new Set();
+  let entries = 0;
 
-  while (offset + 512 <= tar.length) {
-    const header = tar.subarray(offset, offset + 512);
-    if (header.every((byte) => byte === 0)) break;
-
-    const field = (start, end) =>
-      header.subarray(start, end).toString("utf8").replace(/\0.*$/, "").trim();
-    const name = field(0, 100);
-    const prefix = field(345, 500);
-    const fullName = prefix ? `${prefix}/${name}` : name;
-
-    if (!fullName) throw new Error("Backup archive contains unnamed entry");
-    const normalizedName = fullName.replace(/^\.\//, "");
-    const topLevel = normalizedName.split("/")[0];
-    if (topLevel && topLevel !== ".") topLevels.add(topLevel);
-    if (fullName.startsWith("/") || fullName.split("/").includes("..")) {
-      throw new Error(`Unsafe backup archive path: ${fullName}`);
-    }
-
-    const sizeText = field(124, 136);
-    const size = sizeText ? Number.parseInt(sizeText, 8) : 0;
-    if (!Number.isFinite(size) || size < 0) {
-      throw new Error(`Invalid tar size for ${fullName}`);
-    }
-
-    const dataStart = offset + 512;
-    const dataEnd = dataStart + size;
-    if (dataEnd > tar.length) throw new Error(`Truncated tar entry: ${fullName}`);
-
-    if (normalizedName === required[0]) {
-      configText = tar.subarray(dataStart, dataEnd).toString("utf8");
-    }
-    if (normalizedName === required[1]) {
-      agentsText = tar.subarray(dataStart, dataEnd).toString("utf8");
-    }
-
-    entries += 1;
-    offset = dataStart + Math.ceil(size / 512) * 512;
+  try {
+    await tar.t({
+      file: tmpPath,
+      onentry: (entry) => {
+        const normalizedName = String(entry.path || "")
+          .replace(/^\.\//, "")
+          .replace(/\/$/, "");
+        if (!normalizedName) return;
+        seen.add(normalizedName);
+        const topLevel = normalizedName.split("/")[0];
+        if (topLevel) topLevels.add(topLevel);
+        entries += 1;
+      },
+    });
+  } finally {
+    fs.rmSync(tmpPath, { force: true });
   }
 
   if (entries === 0) throw new Error("Backup archive contains no entries");
-  if (!configText) throw new Error(`Missing ${required[0]}`);
-  if (!agentsText || !agentsText.trim()) throw new Error(`Missing or empty ${required[1]}`);
+
+  for (const requiredPath of required) {
+    if (!seen.has(requiredPath)) throw new Error(`Missing ${requiredPath}`);
+  }
 
   const requiredTopLevels = [".openclaw", "workspace", "jarvis-research", "agent-workspaces"];
   for (const name of requiredTopLevels) {
     if (!topLevels.has(name)) throw new Error(`Missing required /data area: ${name}`);
   }
 
-  const cfg = JSON.parse(configText);
-  if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) {
-    throw new Error("openclaw.json is not a JSON object");
-  }
-
   return {
     entries,
-    configBytes: Buffer.byteLength(configText),
-    agentsBytes: Buffer.byteLength(agentsText),
     topLevels: [...topLevels].sort(),
+    requiredPaths: required,
   };
 }
 
@@ -129,7 +107,7 @@ async function captureLiveBackup(key) {
   if (bytes.byteLength === 0) throw new Error("Live backup export was empty");
 
   // Fail before upload if the live export is incomplete.
-  const inspected = inspectTar(bytes);
+  const inspected = await inspectTar(bytes);
 
   await s3.send(new PutObjectCommand({
     Bucket: bucket,
@@ -169,7 +147,7 @@ async function run() {
   const exported = new Uint8Array(await response.arrayBuffer());
   if (exported.byteLength === 0) throw new Error("Live /data export was empty");
 
-  const liveInspection = inspectTar(exported);
+  const liveInspection = await inspectTar(exported);
 
   await s3.send(new PutObjectCommand({
     Bucket: bucket,
@@ -185,15 +163,13 @@ async function run() {
     throw new Error("S3 object length does not match downloaded bytes");
   }
 
-  const persistedInspection = inspectTar(persisted);
+  const persistedInspection = await inspectTar(persisted);
   return {
     ok: true,
     key,
     exportedBytes: exported.byteLength,
     persistedBytes: persisted.byteLength,
     entries: persistedInspection.entries,
-    configBytes: persistedInspection.configBytes,
-    agentsBytes: persistedInspection.agentsBytes,
     topLevels: persistedInspection.topLevels,
     liveTopLevels: liveInspection.topLevels,
   };
