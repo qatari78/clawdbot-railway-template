@@ -110,12 +110,15 @@ Evidence rules:
 - Living/current sources are re-fetched for present-tense questions; immutable historical documents may be reused by content hash.
 - Never count the same canonical source URL twice merely because both researchers found it.
 
-Research Gap Service routes:
-- verify/read_document -> Verifier
-- find_missing/find_contrary/enumerate -> Scout
-- social -> X helper
-- calculate -> deterministic calculation from verified ledger inputs; missing inputs -> Verifier
-Always check the ledger first, merge duplicate gaps, and append new evidence as a dossier delta. Do not bypass the shared runner/ledger for ordinary Forum research.
+Research Gap Service:
+- Jarvis/advisers submit a de-identified JSON request with parent_brief_id, type, question, requested_by, materiality, and deidentified=true.
+- Production entry point: \`node /app/src/jarvis-research-gap.js <gap-request-json-path>\`.
+- verify/read_document -> Verifier.
+- find_missing/find_contrary/enumerate -> Scout.
+- social -> dedicated X helper; do not send through this web gap command.
+- calculate -> deterministic calculation from verified ledger inputs; do not send through this web gap command.
+- The Gap Service deduplicates identical completed requests, appends new evidence packets to the parent ledger, reruns verification/support checks, rebuilds the parent dossier, and writes a dossier delta.
+Do not bypass the shared runner/ledger for ordinary Forum or Counsel research.
 
 Forum advisers do not get unrestricted web tools. Counsel advisers may steer bounded evidence_search/evidence_fetch through the shared research service; results still enter the common ledger.
 
