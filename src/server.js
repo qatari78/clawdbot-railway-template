@@ -345,6 +345,51 @@ function launchOpenRouterKeyAuditV1() {
   });
 }
 
+
+async function runJarvisMainSessionRecoveryV1() {
+  const markerPath = path.join(STATE_DIR, ".jarvis-main-session-recovery-v1.json");
+  if (fs.existsSync(markerPath)) {
+    console.log("[main-session-recovery-v1] prior attempt exists; skipping");
+    return;
+  }
+
+  const startedAt = new Date().toISOString();
+  let record;
+  try {
+    const params = JSON.stringify({ key: "agent:main:main", reason: "reset" });
+    const r = await runCmd(
+      OPENCLAW_NODE,
+      clawArgs(["gateway", "call", "sessions.reset", "--params", params, "--json", "--timeout", "60000"]),
+      {
+        env: {
+          ...process.env,
+          OPENCLAW_STATE_DIR: STATE_DIR,
+          OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
+        },
+        timeoutMs: 70_000,
+      },
+    );
+    const output = redactSecrets(r.output || "").trim();
+    record = { version: 1, startedAt, finishedAt: new Date().toISOString(), ok: true, output };
+    console.log("[main-session-recovery-v1] reset completed " + JSON.stringify(record));
+  } catch (err) {
+    record = {
+      version: 1,
+      startedAt,
+      finishedAt: new Date().toISOString(),
+      ok: false,
+      error: redactSecrets(String(err)),
+    };
+    console.error("[main-session-recovery-v1] reset failed " + JSON.stringify(record));
+  }
+
+  try {
+    fs.writeFileSync(markerPath, JSON.stringify(record, null, 2) + "\n", { encoding: "utf8", mode: 0o600 });
+  } catch (err) {
+    console.warn("[main-session-recovery-v1] failed to persist marker: " + String(err));
+  }
+}
+
 function requireSetupAuth(req, res, next) {
   if (!SETUP_PASSWORD) {
     return res
@@ -2098,6 +2143,7 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
     try {
       await ensureGatewayRunning();
       console.log("[wrapper] gateway ready");
+      await runJarvisMainSessionRecoveryV1();
       launchOpenRouterKeyAuditV1();
       launchJarvisSecurityAuditV1();
       launchJarvisAgentSmokeV1();
