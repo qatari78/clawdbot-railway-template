@@ -10,6 +10,7 @@ import {
   writeResearchBrief,
 } from "./jarvis-research-system-v1.js";
 import { resolveOpenRouterKeyForRuntime } from "./openrouter-key-audit.js";
+import { verifyResearchSources } from "./jarvis-research-verification-v1.js";
 
 const START="JARVIS_PACKET_START";
 const END="JARVIS_PACKET_END";
@@ -197,9 +198,10 @@ export async function runResearchBrief({brief,level="dual"}){
     telemetry.push(x.telemetry);
   }
   const pass=failures.length===0&&packets.length===jobs.length;
-  let merge=null,dossier=null;
+  let merge=null,verification=null,dossier=null;
   if(pass){
     merge=mergeResearchBrief(normalized.brief_id);
+    verification=await verifyResearchSources(normalized.brief_id);
     dossier=buildResearchDossier(normalized.brief_id);
   }
   const totalCost=telemetry.reduce((s,x)=>s+Number(x.usage?.cost||0),0);
@@ -208,6 +210,7 @@ export async function runResearchBrief({brief,level="dual"}){
     started_at:normalized.commissioned_at,finished_at:new Date().toISOString(),pass,failures,
     packets,telemetry,total_cost_usd:totalCost,
     merge:merge?{merge_id:merge.merge_id,source_count:merge.source_count,claim_count:merge.claim_count,contradiction_count:merge.contradiction_count}:null,
+    verification:verification?{verification_id:verification.verification_id,reachable_sources:verification.reachable_sources,unreachable_sources:verification.unreachable_sources,numeric_mismatches:verification.numeric_mismatches,source_failures:verification.source_failures}:null,
     dossier:dossier?{dossier_id:dossier.dossier_id,path:dossier.path}:null
   };
   const runPath=path.join(p.runs,runId+".json");
