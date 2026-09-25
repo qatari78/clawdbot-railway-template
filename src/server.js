@@ -15,7 +15,8 @@ import { runJarvisAdviserMemoryCommissioningV1 } from "./jarvis-adviser-memory-c
 import { runJarvisSecurityAuditV1 } from "./jarvis-security-audit.js";
 import { runOpenRouterKeyAuditV1 } from "./openrouter-key-audit.js";
 import { applyJarvisResearchSystemV1 } from "./jarvis-research-system-v1.js";
-import { applyJarvisSeatConfigV1 } from "./jarvis-seat-config-v1.js";\nimport { runJarvisResearchCommissioningV1 } from "./jarvis-research-commissioning.js";
+import { applyJarvisSeatConfigV1 } from "./jarvis-seat-config-v1.js";
+import { runJarvisResearchCommissioningV1 } from "./jarvis-research-commissioning.js";
 
 // Migrate deprecated CLAWDBOT_* env vars → OPENCLAW_* so existing Railway deployments
 // keep working. Users should update their Railway Variables to use the new names.
@@ -2096,7 +2097,8 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
       console.log("[wrapper] gateway ready");
       launchOpenRouterKeyAuditV1();
       launchJarvisSecurityAuditV1();
-      launchJarvisAgentSmokeV1();\launchJarvisResearchCommissioningV1();\nn
+      launchJarvisAgentSmokeV1();
+      launchJarvisResearchCommissioningV1();
       launchJarvisAdviserMemoryCommissioningV1();
     } catch (err) {
       console.error(`[wrapper] gateway failed to start at boot: ${String(err)}`);
@@ -2110,8 +2112,9 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
           console.log("[wrapper] gateway ready after retry");
           clearInterval(gatewayRetryTimer);
           launchJarvisSecurityAuditV1();
-          launchJarvisAgentSmokeV1();\launchJarvisResearchCommissioningV1();\nn
-      launchJarvisAdviserMemoryCommissioningV1();
+          launchJarvisAgentSmokeV1();
+          launchJarvisResearchCommissioningV1();
+          launchJarvisAdviserMemoryCommissioningV1();
         } catch (retryErr) {
           console.warn(`[wrapper] gateway retry not ready yet: ${String(retryErr)}`);
         }
