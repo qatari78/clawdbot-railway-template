@@ -2600,6 +2600,7 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
           await ensureGatewayRunning();
           console.log("[wrapper] gateway ready after retry");
           clearInterval(gatewayRetryTimer);
+          await runC1ContextDiagnosticV1();
           launchJarvisSecurityAuditV1();
           launchJarvisAgentSmokeV1();
           launchJarvisAdviserMemoryCommissioningV1();
