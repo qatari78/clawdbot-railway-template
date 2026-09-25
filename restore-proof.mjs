@@ -69,10 +69,10 @@ function inspectTar(gzipData) {
     const dataEnd = dataStart + size;
     if (dataEnd > tar.length) throw new Error(`Truncated tar entry: ${fullName}`);
 
-    if (fullName === required[0]) {
+    if (normalizedName === required[0]) {
       configText = tar.subarray(dataStart, dataEnd).toString("utf8");
     }
-    if (fullName === required[1]) {
+    if (normalizedName === required[1]) {
       agentsText = tar.subarray(dataStart, dataEnd).toString("utf8");
     }
 
@@ -100,6 +100,51 @@ function inspectTar(gzipData) {
     agentsBytes: Buffer.byteLength(agentsText),
     topLevels: [...topLevels].sort(),
   };
+}
+
+async function captureLiveBackup(key) {
+  if (process.env.CAPTURE_BACKUP !== "1") return null;
+
+  const domain = (process.env.PRIMARY_SERVICE_DOMAIN || "").trim();
+  const token = (process.env.BACKUP_EXPORT_TOKEN || "").trim();
+  if (!domain) throw new Error("PRIMARY_SERVICE_DOMAIN is not configured");
+  if (!token) throw new Error("BACKUP_EXPORT_TOKEN is not configured");
+
+  const baseUrl = domain.includes("://")
+    ? domain.replace(/\/$/, "")
+    : `http://${domain}:8080`;
+
+  const health = await fetch(`${baseUrl}/healthz`, {
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!health.ok) throw new Error(`Primary health check failed: ${health.status}`);
+
+  const response = await fetch(`${baseUrl}/setup/export`, {
+    headers: { Authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(180000),
+  });
+  if (!response.ok) throw new Error(`Backup export returned ${response.status}`);
+
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.byteLength === 0) throw new Error("Live backup export was empty");
+
+  // Fail before upload if the live export is incomplete.
+  const inspected = inspectTar(bytes);
+
+  await s3.send(new PutObjectCommand({
+    Bucket: bucket,
+    Key: key,
+    Body: bytes,
+    ContentType: "application/gzip",
+  }));
+
+  console.log("BACKUP_CAPTURED " + JSON.stringify({
+    key,
+    bytes: bytes.byteLength,
+    entries: inspected.entries,
+    topLevels: inspected.topLevels,
+  }));
+  return bytes;
 }
 
 async function run() {
