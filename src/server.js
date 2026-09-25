@@ -635,15 +635,13 @@ async function runC1ContextDiagnosticV1() {
     "trajectory-exports",
     outputName,
   );
-  const workspaceFiles = c1WorkspaceFileSizes(WORKSPACE_DIR);
   let stage = "prepare";
 
   try {
     fs.rmSync(trajectoryWorkspace, { recursive: true, force: true });
     fs.mkdirSync(trajectoryWorkspace, { recursive: true, mode: 0o700 });
 
-    // Snapshot transcript first so the diagnostic command itself cannot affect
-    // the transcript measurement even if command auditing changes in the future.
+    // Read-only transcript snapshot. No agent turn, slash command, or provider call.
     stage = "export";
     const exportResult = await runCmd(
       OPENCLAW_NODE,
@@ -673,59 +671,10 @@ async function runC1ContextDiagnosticV1() {
       throw new Error("trajectory export failed");
     }
 
-    stage = "context-command";
-    const contextResult = await runCmd(
-      OPENCLAW_NODE,
-      clawArgs([
-        "agent",
-        "--session-key",
-        sessionKey,
-        "--agent",
-        "main",
-        "--message",
-        "/context json",
-        "--json",
-        "--timeout",
-        "60",
-      ]),
-      {
-        env: {
-          ...process.env,
-          OPENCLAW_STATE_DIR: STATE_DIR,
-          OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
-        },
-        timeoutMs: 90_000,
-      },
-    );
-    if (contextResult.code !== 0) {
-      console.error(
-        "[c1-context-v1] failed=" +
-          JSON.stringify({
-            stage,
-            code: Number(contextResult.code ?? -1),
-            outputBytes: Buffer.byteLength(contextResult.output || "", "utf8"),
-          }),
-      );
-      return;
-    }
-
-    stage = "parse-context-envelope";
-    const envelope = c1ParseCliJson(contextResult.output);
-    const payloads = Array.isArray(envelope?.result?.payloads)
-      ? envelope.result.payloads
-      : [];
-    const contextText = payloads.find((payload) => typeof payload?.text === "string")?.text;
-    if (typeof contextText !== "string") {
-      throw new Error("context command returned no text payload");
-    }
-    const contextJson = JSON.parse(contextText);
-    const report = contextJson?.report;
-    const session = contextJson?.session ?? {};
-    if (!report || typeof report !== "object") {
-      throw new Error("context command returned no report");
-    }
-
     stage = "parse-transcript";
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(outputDir, "manifest.json"), "utf8"),
+    );
     const branchPath = path.join(outputDir, "session-branch.json");
     const branch = fs.existsSync(branchPath)
       ? JSON.parse(fs.readFileSync(branchPath, "utf8"))
@@ -736,126 +685,171 @@ async function runC1ContextDiagnosticV1() {
       0,
     );
 
-    stage = "measure";
-    const injectedRows = Array.isArray(report.injectedWorkspaceFiles)
-      ? report.injectedWorkspaceFiles.map((file) => {
-          const injectedChars =
-            typeof file?.injectedChars === "number" ? file.injectedChars : 0;
-          return {
-            name: String(file?.name ?? path.basename(String(file?.path ?? ""))),
-            rawChars: Number(file?.rawChars ?? 0),
-            injectedChars,
-            tokensApprox: c1EstimateTokensFromChars(injectedChars),
-            truncated: file?.truncated === true ? 1 : 0,
-            missing: file?.missing === true ? 1 : 0,
-            verified: file?.injectionStatus === "native_unverified" ? 0 : 1,
-          };
-        })
-      : [];
+    stage = "build-openclaw-estimate";
+    const cfg = JSON.parse(fs.readFileSync(configPath(), "utf8"));
+    const [
+      { resolveCommandsSystemPromptBundle },
+      { buildBootstrapInjectionStats },
+      { buildSystemPromptReport },
+    ] = await Promise.all([
+      import("file:///openclaw/dist/auto-reply/reply/commands-system-prompt.js"),
+      import("file:///openclaw/dist/agents/bootstrap-budget.js"),
+      import("file:///openclaw/dist/agents/system-prompt-report.js"),
+    ]);
 
+    const mainEntry = Array.isArray(cfg?.agents?.entries)
+      ? cfg.agents.entries.find((entry) => entry?.id === "main")
+      : cfg?.agents?.entries?.main;
+    const configuredModel =
+      typeof mainEntry?.model === "string"
+        ? mainEntry.model
+        : typeof cfg?.agents?.defaults?.model === "string"
+          ? cfg.agents.defaults.model
+          : "openrouter/x-ai/grok-4.7";
+    const provider = configuredModel.includes("/")
+      ? configuredModel.split("/")[0]
+      : "openrouter";
+    const model = configuredModel.replace(/^openrouter\//u, "");
+    const reasoning =
+      mainEntry?.thinking ??
+      cfg?.agents?.defaults?.thinking ??
+      process.env.JARVIS_MAIN_THINKING ??
+      "high";
+
+    const params = {
+      cfg,
+      ctx: {
+        SessionKey: sessionKey,
+        RuntimePolicySessionKey: sessionKey,
+        ChatType: "direct",
+        Provider: "whatsapp",
+        OriginatingChannel: "whatsapp",
+        AccountId: "default",
+        AgentId: "main",
+      },
+      command: {
+        channel: "whatsapp",
+        accountId: "default",
+        senderId: "c1-readonly-diagnostic",
+      },
+      sessionKey,
+      sessionEntry: {
+        sessionId: String(manifest?.sessionId || ""),
+        chatType: "direct",
+      },
+      agentId: "main",
+      workspaceDir: WORKSPACE_DIR,
+      provider,
+      model,
+      elevated: { enabled: false, allowed: false },
+      resolvedElevatedLevel: "off",
+      resolvedReasoningLevel: reasoning,
+    };
+
+    const bundle = await resolveCommandsSystemPromptBundle(params);
+    const injectedWorkspaceFiles = buildBootstrapInjectionStats({
+      bootstrapFiles: bundle.bootstrapFiles,
+      injectedFiles: bundle.injectedFiles,
+    });
+    const limits = c1ResolveBootstrapLimits();
+    const report = buildSystemPromptReport({
+      source: "estimate",
+      generatedAt: Date.now(),
+      sessionId: String(manifest?.sessionId || ""),
+      sessionKey,
+      provider,
+      model,
+      workspaceDir: WORKSPACE_DIR,
+      bootstrapMaxChars: limits.bootstrapMaxChars,
+      bootstrapTotalMaxChars: limits.bootstrapTotalMaxChars,
+      sandbox: {
+        mode: bundle.sandboxRuntime?.mode,
+        sandboxed: Boolean(bundle.sandboxRuntime?.sandboxed),
+      },
+      systemPrompt: bundle.systemPrompt,
+      injectedWorkspaceFiles,
+      skillsPrompt: bundle.skillsPrompt,
+      tools: bundle.tools,
+    });
+
+    stage = "measure";
+    const injectedRows = report.injectedWorkspaceFiles.map((file) => ({
+      name: String(file.name ?? path.basename(String(file.path ?? ""))),
+      rawChars: Number(file.rawChars ?? 0),
+      injectedChars: Number(file.injectedChars ?? 0),
+      tokensApprox: c1EstimateTokensFromChars(Number(file.injectedChars ?? 0)),
+      truncated: file.truncated === true ? 1 : 0,
+      missing: file.missing === true ? 1 : 0,
+    }));
     const injectedCharsTotal = injectedRows.reduce(
       (sum, row) => sum + row.injectedChars,
       0,
     );
-    const skillsChars = Number(report?.skills?.promptChars ?? 0);
-    const skillsCount = Array.isArray(report?.skills?.entries)
-      ? report.skills.entries.length
-      : 0;
-    const toolSchemaChars = Number(report?.tools?.schemaChars ?? 0);
-    const toolCount = Array.isArray(report?.tools?.entries)
-      ? report.tools.entries.length
-      : 0;
-
-    const systemPromptTotalChars = Number(report?.systemPrompt?.chars ?? 0);
-    const projectContextChars = Number(report?.systemPrompt?.projectContextChars ?? 0);
-    const nonProjectContextChars = Number(report?.systemPrompt?.nonProjectContextChars ?? 0);
+    const skillsChars = Number(report.skills.promptChars ?? 0);
+    const toolSchemaChars = Number(report.tools.schemaChars ?? 0);
+    const systemPromptTotalChars = Number(report.systemPrompt.chars ?? 0);
+    const projectContextChars = Number(report.systemPrompt.projectContextChars ?? 0);
+    const nonProjectContextChars = Number(report.systemPrompt.nonProjectContextChars ?? 0);
     const projectFrameChars = Math.max(0, projectContextChars - injectedCharsTotal);
     const systemBaseChars =
       Math.max(0, nonProjectContextChars - skillsChars) + projectFrameChars;
 
-    const runtimeContextChars = Number(report?.currentTurn?.runtimeContextChars ?? 0);
-    const modelOnlyPromptChars = Number(report?.currentTurn?.modelOnlyPromptChars ?? 0);
-
-    // The target main-session call's live gateway trace already proved active-memory
-    // recall was skipped by policy. Keep it explicit instead of folding it into
-    // an unknown model-only bucket.
-    const memoryRecallChars = 0;
-    const otherModelOnlyChars = modelOnlyPromptChars;
-
     const setupFloorChars =
-      systemBaseChars +
-      skillsChars +
-      injectedCharsTotal +
-      toolSchemaChars +
-      runtimeContextChars +
-      memoryRecallChars +
-      otherModelOnlyChars;
+      systemBaseChars + skillsChars + injectedCharsTotal + toolSchemaChars;
     const accountedChars = setupFloorChars + transcriptChars;
 
-    const result = {
-      version: 5,
-      reportSource: String(report?.source ?? "unknown"),
-      limits: {
-        bootstrapMaxChars: Number(report?.bootstrapMaxChars ?? 0),
-        bootstrapTotalMaxChars: Number(report?.bootstrapTotalMaxChars ?? 0),
-        userBootstrapMaxChars: 4000,
-      },
-      source: {
-        systemPrompt: {
-          totalCharsRendered: systemPromptTotalChars,
-          charsExclusive: systemBaseChars,
-          tokensApprox: c1EstimateTokensFromChars(systemBaseChars),
-          projectFrameChars,
-        },
-        skillsPrompt: {
-          chars: skillsChars,
-          tokensApprox: c1EstimateTokensFromChars(skillsChars),
-          count: skillsCount,
-        },
-        toolSchemas: {
-          chars: toolSchemaChars,
-          tokensApprox: c1EstimateTokensFromChars(toolSchemaChars),
-          count: toolCount,
-        },
-        injectedWorkspaceFiles: injectedRows,
-        injectedWorkspaceFilesTotal: {
-          chars: injectedCharsTotal,
-          tokensApprox: c1EstimateTokensFromChars(injectedCharsTotal),
-        },
-        runtimeContext: {
-          chars: runtimeContextChars,
-          tokensApprox: c1EstimateTokensFromChars(runtimeContextChars),
-        },
-        memoryRecall: {
-          chars: memoryRecallChars,
-          tokensApprox: 0,
-          policySkipped: 1,
-        },
-        otherModelOnlyPrompt: {
-          chars: otherModelOnlyChars,
-          tokensApprox: c1EstimateTokensFromChars(otherModelOnlyChars),
-        },
-        transcript: {
-          chars: transcriptChars,
-          tokensApprox: c1EstimateTokensFromChars(transcriptChars),
-          messages: messages.length,
-        },
-      },
-      totals: {
-        setupFloorChars,
-        setupFloorTokensApprox: c1EstimateTokensFromChars(setupFloorChars),
-        accountedChars,
-        accountedTokensApprox: c1EstimateTokensFromChars(accountedChars),
-        sessionInputTokens: Number(session?.inputTokens ?? 0),
-        sessionOutputTokens: Number(session?.outputTokens ?? 0),
-        sessionTotalTokens: Number(session?.totalTokens ?? 0),
-        sessionTotalTokensFresh: session?.totalTokensFresh === true ? 1 : 0,
-        contextWindowTokens: Number(session?.contextTokens ?? 0),
-      },
-      workspaceFiles,
-    };
-
-    console.log("[c1-context-v1] " + JSON.stringify(result));
+    console.log(
+      "[c1-context-v1] " +
+        JSON.stringify({
+          version: 6,
+          readOnly: 1,
+          reportSource: "estimate",
+          limits: {
+            bootstrapMaxChars: Number(report.bootstrapMaxChars ?? 0),
+            bootstrapTotalMaxChars: Number(report.bootstrapTotalMaxChars ?? 0),
+            userBootstrapMaxChars: 4000,
+          },
+          source: {
+            systemPrompt: {
+              totalCharsRendered: systemPromptTotalChars,
+              charsExclusive: systemBaseChars,
+              tokensApprox: c1EstimateTokensFromChars(systemBaseChars),
+              projectFrameChars,
+            },
+            skillsPrompt: {
+              chars: skillsChars,
+              tokensApprox: c1EstimateTokensFromChars(skillsChars),
+              count: report.skills.entries.length,
+            },
+            toolSchemas: {
+              chars: toolSchemaChars,
+              tokensApprox: c1EstimateTokensFromChars(toolSchemaChars),
+              count: report.tools.entries.length,
+            },
+            injectedWorkspaceFiles: injectedRows,
+            injectedWorkspaceFilesTotal: {
+              chars: injectedCharsTotal,
+              tokensApprox: c1EstimateTokensFromChars(injectedCharsTotal),
+            },
+            memoryRecall: {
+              chars: 0,
+              tokensApprox: 0,
+              policySkipped: 1,
+            },
+            transcript: {
+              chars: transcriptChars,
+              tokensApprox: c1EstimateTokensFromChars(transcriptChars),
+              messages: messages.length,
+            },
+          },
+          totals: {
+            setupFloorChars,
+            setupFloorTokensApprox: c1EstimateTokensFromChars(setupFloorChars),
+            accountedChars,
+            accountedTokensApprox: c1EstimateTokensFromChars(accountedChars),
+          },
+        }),
+    );
   } catch (err) {
     console.error(
       "[c1-context-v1] failed=" +
