@@ -693,14 +693,38 @@ async function runC1ContextDiagnosticV1() {
       .map((line) => JSON.parse(line));
 
     stage = "resolve-call";
-    const compiledIndex = events.findLastIndex((event) => event?.type === "context.compiled");
-    if (compiledIndex < 0) throw new Error("missing context.compiled");
+    const compiledIndex = events.findLastIndex((event) => {
+      const data = event?.data;
+      return (
+        data &&
+        typeof data === "object" &&
+        typeof data.systemPrompt === "string" &&
+        typeof data.prompt === "string" &&
+        Array.isArray(data.messages)
+      );
+    });
+    if (compiledIndex < 0) {
+      const typeCounts = {};
+      for (const event of events) {
+        const type = typeof event?.type === "string" ? event.type : "<missing>";
+        typeCounts[type] = (typeCounts[type] || 0) + 1;
+      }
+      console.error(
+        "[c1-context-v1] failed=" +
+          JSON.stringify({
+            stage,
+            reason: "no-prompt-bearing-runtime-event",
+            eventCount: events.length,
+            typeCounts,
+          }),
+      );
+      return;
+    }
     const compiled = events[compiledIndex];
     const compiledData = compiled?.data ?? {};
-    const systemPrompt = typeof compiledData.systemPrompt === "string" ? compiledData.systemPrompt : "";
-    const currentPrompt = typeof compiledData.prompt === "string" ? compiledData.prompt : "";
-    const messages = Array.isArray(compiledData.messages) ? compiledData.messages : [];
-    if (!systemPrompt) throw new Error("missing system prompt");
+    const systemPrompt = compiledData.systemPrompt;
+    const currentPrompt = compiledData.prompt;
+    const messages = compiledData.messages;
 
     const completed =
       [...events]
