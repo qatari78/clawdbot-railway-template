@@ -1955,6 +1955,28 @@ function applyJarvisOperationalDefaults() {
     cfg.channels.whatsapp ??= {};
     cfg.channels.whatsapp.enabled = true;
     cfg.channels.whatsapp.dmPolicy = "pairing";
+
+    // WhatsApp has no editable preview transport. Stream completed assistant
+    // text blocks as normal WhatsApp messages so the owner sees useful text
+    // while long/high-reasoning completions continue instead of waiting for
+    // the entire final response.
+    cfg.channels.whatsapp.streaming ??= {};
+    cfg.channels.whatsapp.streaming.chunkMode = "newline";
+    cfg.channels.whatsapp.streaming.block ??= {};
+    cfg.channels.whatsapp.streaming.block.enabled = true;
+    cfg.channels.whatsapp.streaming.block.coalesce = {
+      minChars: 40,
+      maxChars: 700,
+      idleMs: 150,
+    };
+    cfg.agents.defaults.blockStreamingBreak = "text_end";
+    cfg.agents.defaults.blockStreamingChunk = {
+      minChars: 40,
+      maxChars: 700,
+      breakPreference: "sentence",
+    };
+    cfg.agents.defaults.humanDelay = { mode: "off" };
+
     if (process.env.JARVIS_WHATSAPP_ROOMS_V1?.trim() !== "1") {
       cfg.channels.whatsapp.groupPolicy = "disabled";
     }
