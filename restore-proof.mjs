@@ -1,5 +1,5 @@
 // Isolated, non-destructive restore verifier.
-import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
 import { gunzipSync } from "node:zlib";
 
 const required = [".openclaw/openclaw.json", "workspace/AGENTS.md"];
@@ -105,24 +105,52 @@ function inspectTar(gzipData) {
 async function run() {
   const date = new Date().toISOString().split("T")[0];
   const key = process.env.BACKUP_KEY || `openclaw-state-${date}.tar.gz`;
+  const exportToken = process.env.BACKUP_EXPORT_TOKEN || "";
+  const serviceDomain = (process.env.PRIMARY_SERVICE_DOMAIN || "").trim();
+
+  if (!exportToken) throw new Error("BACKUP_EXPORT_TOKEN is not configured");
+  if (!serviceDomain) throw new Error("PRIMARY_SERVICE_DOMAIN is not configured");
+
+  const baseUrl = serviceDomain.includes("://")
+    ? serviceDomain.replace(/\/$/, "")
+    : `http://${serviceDomain}:8080`;
+
+  const response = await fetch(`${baseUrl}/setup/export`, {
+    headers: { Authorization: `Bearer ${exportToken}` },
+    signal: AbortSignal.timeout(120000),
+  });
+  if (!response.ok) throw new Error(`Backup export returned ${response.status}`);
+
+  const exported = new Uint8Array(await response.arrayBuffer());
+  if (exported.byteLength === 0) throw new Error("Live /data export was empty");
+
+  const liveInspection = inspectTar(exported);
+
+  await s3.send(new PutObjectCommand({
+    Bucket: bucket,
+    Key: key,
+    Body: exported,
+    ContentType: "application/gzip",
+  }));
 
   const obj = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
-  const bytes = await bodyToBytes(obj.Body);
-
-  if (bytes.byteLength === 0) throw new Error("Downloaded backup object is empty");
-  if (typeof obj.ContentLength === "number" && obj.ContentLength !== bytes.byteLength) {
+  const persisted = await bodyToBytes(obj.Body);
+  if (persisted.byteLength === 0) throw new Error("Persisted backup object is empty");
+  if (typeof obj.ContentLength === "number" && obj.ContentLength !== persisted.byteLength) {
     throw new Error("S3 object length does not match downloaded bytes");
   }
 
-  const inspected = inspectTar(bytes);
+  const persistedInspection = inspectTar(persisted);
   return {
     ok: true,
     key,
-    bytes: bytes.byteLength,
-    entries: inspected.entries,
-    configBytes: inspected.configBytes,
-    agentsBytes: inspected.agentsBytes,
-    topLevels: inspected.topLevels,
+    exportedBytes: exported.byteLength,
+    persistedBytes: persisted.byteLength,
+    entries: persistedInspection.entries,
+    configBytes: persistedInspection.configBytes,
+    agentsBytes: persistedInspection.agentsBytes,
+    topLevels: persistedInspection.topLevels,
+    liveTopLevels: liveInspection.topLevels,
   };
 }
 
