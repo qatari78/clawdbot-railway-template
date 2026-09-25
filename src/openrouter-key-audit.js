@@ -122,6 +122,31 @@ function findKeys({ stateDir, configPath }) {
     }
   } catch {}
 
+
+  // v13+ canonical shared auth profile store is folded into config_machine_state.
+  const sharedDbPath = path.join(stateDir, "state", "openclaw.sqlite");
+  if (fs.existsSync(sharedDbPath)) {
+    let db;
+    try {
+      db = new DatabaseSync(sharedDbPath, { readOnly: true });
+      const schemaVersion = Number(db.prepare("PRAGMA user_version").get()?.user_version ?? 0);
+      if (schemaVersion >= 13) {
+        const row = db.prepare(
+          "SELECT value_json FROM config_machine_state WHERE state_key='authProfiles.store' LIMIT 1"
+        ).get();
+        if (typeof row?.value_json === "string") {
+          try {
+            scanProfileStore(JSON.parse(row.value_json), "shared-auth-config-machine-state", null);
+          } catch {}
+        }
+      }
+    } catch {
+      // Best-effort read-only discovery.
+    } finally {
+      try { db?.close(); } catch {}
+    }
+  }
+
   // Shared auth profiles live here on current OpenClaw; older migrated installs
   // may still keep the shared row in main's agent DB, already covered above.
   scanSqlite(path.join(stateDir, "state", "openclaw.sqlite"), "shared-auth-sqlite", null);
@@ -215,6 +240,45 @@ async function resolveOpenRouterKeyViaGateway({
   }
 
   return null;
+}
+
+
+export async function resolveOpenRouterKeyForRuntime({ stateDir, configPath }) {
+  const found = findKeys({ stateDir, configPath });
+  const attempts = [];
+  for (const item of found) {
+    try {
+      const res = await fetch("https://openrouter.ai/api/v1/key", {
+        method: "GET",
+        headers: { Authorization: `Bearer ${item.key}` },
+      });
+      attempts.push({
+        ok: res.ok,
+        httpStatus: res.status,
+        source: item.source,
+        agentId: item.agentId,
+        profileId: item.profileId,
+      });
+      if (res.ok) {
+        return {
+          key: item.key,
+          source: item.source,
+          agentId: item.agentId,
+          profileId: item.profileId,
+          attempts,
+        };
+      }
+    } catch {
+      attempts.push({
+        ok: false,
+        httpStatus: null,
+        source: item.source,
+        agentId: item.agentId,
+        profileId: item.profileId,
+      });
+    }
+  }
+  return { key: null, source: null, agentId: null, profileId: null, attempts };
 }
 
 function pickData(data) {
