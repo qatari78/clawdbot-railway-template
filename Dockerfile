@@ -244,6 +244,233 @@ if (!test.includes("falls back to the named runtime only when explicitly opted i
 }
 NODE
 
+
+# TEMPORARY: WhatsApp runtime visibility diagnostic instrumentation.
+# Logs only runtime-slot/controller/listener presence and opaque per-process object ids.
+# No message text, phone numbers, credentials, config values, or payloads are logged.
+RUN node <<'NODE'
+const fs = require("fs");
+
+const scopePath = "src/plugins/plugin-instance-scope.ts";
+const storePath = "src/plugin-sdk/runtime-store.ts";
+const controllerPath = "extensions/whatsapp/src/connection-controller-runtime-context.ts";
+
+for (const p of [scopePath, storePath, controllerPath]) {
+  if (!fs.existsSync(p)) throw new Error(\`WhatsApp diagnostic target missing: \${p}\`);
+}
+
+// 1) Expose an opaque process-local id for the current managed PluginInstance.
+let scope = fs.readFileSync(scopePath, "utf8");
+if (!scope.includes("getCurrentPluginInstanceDiagnosticId")) {
+  const needle = \`export const pluginInvocationContext = resolveGlobalSingleton(
+  Symbol.for("openclaw.pluginInvocationContext"),
+  () => new AsyncLocalStorage<PluginInvocationContext>(),
+);
+\`;
+  const replacement = needle + \`
+const whatsappDiagnosticInstanceIds = new WeakMap<object, number>();
+let whatsappDiagnosticNextInstanceId = 1;
+
+/** TEMPORARY diagnostic identity; opaque and process-local. */
+export function getCurrentPluginInstanceDiagnosticId(): string {
+  const instance = pluginInstanceInvocation.getStore()?.instance as PluginInstanceHandle | undefined;
+  if (!instance) {
+    return "none";
+  }
+  let id = whatsappDiagnosticInstanceIds.get(instance as object);
+  if (!id) {
+    id = whatsappDiagnosticNextInstanceId++;
+    whatsappDiagnosticInstanceIds.set(instance as object, id);
+  }
+  return \\\`\${instance.pluginId}#\${id}\\\`;
+}
+\`;
+  if (!scope.includes(needle)) throw new Error("plugin-instance diagnostic insertion target not found");
+  scope = scope.replace(needle, replacement);
+  fs.writeFileSync(scopePath, scope);
+}
+
+// 2) Instrument only the WhatsApp channel-context-owner runtime store.
+let store = fs.readFileSync(storePath, "utf8");
+if (!store.includes("wa-runtime-diag")) {
+  const importNeedle =
+    'import { getPluginInstanceRuntimeSlot } from "../plugins/plugin-instance-scope.js";';
+  const importReplacement =
+    'import { getCurrentPluginInstanceDiagnosticId, getPluginInstanceRuntimeSlot } from "../plugins/plugin-instance-scope.js";';
+  if (!store.includes(importNeedle)) throw new Error("runtime-store diagnostic import target not found");
+  store = store.replace(importNeedle, importReplacement);
+
+  const readNeedle = \`  const resolveSlot = () => getPluginInstanceRuntimeSlot(instanceKey) ?? defaultSlot;
+  const readRuntime = (): T | null => {
+    const instanceSlot = getPluginInstanceRuntimeSlot(instanceKey);
+    if (!instanceSlot) {
+      return (defaultSlot.runtime as T | null) ?? null;
+    }
+    if (instanceSlot.runtime != null || !resolved.fallbackToDefaultWhenInstanceEmpty) {
+      return (instanceSlot.runtime as T | null) ?? null;
+    }
+    return (defaultSlot.runtime as T | null) ?? null;
+  };
+
+  return {
+    setRuntime(next: T) {
+      resolveSlot().runtime = next;
+    },
+    clearRuntime() {
+      resolveSlot().runtime = null;
+    },
+    tryGetRuntime() {
+      return readRuntime();
+    },
+    getRuntime() {
+      const runtime = readRuntime();
+      if (runtime == null) {
+        throw new Error(resolved.errorMessage);
+      }
+      return runtime;
+    },
+  };\`;
+
+  const readReplacement = \`  const resolveSlot = () => getPluginInstanceRuntimeSlot(instanceKey) ?? defaultSlot;
+  const diagnosticKey = "plugin-runtime:whatsapp:channel-context-owner";
+  const diagnosticObjectIds = new WeakMap<object, number>();
+  let diagnosticNextObjectId = 1;
+  const diagnosticObjectId = (value: unknown): string => {
+    if ((typeof value !== "object" && typeof value !== "function") || value === null) {
+      return "none";
+    }
+    const objectValue = value as object;
+    let id = diagnosticObjectIds.get(objectValue);
+    if (!id) {
+      id = diagnosticNextObjectId++;
+      diagnosticObjectIds.set(objectValue, id);
+    }
+    return String(id);
+  };
+  const logDiagnostic = (event: string, details: Record<string, unknown>): void => {
+    if (resolved.key !== diagnosticKey) {
+      return;
+    }
+    console.warn(
+      "[wa-runtime-diag] " +
+        JSON.stringify({
+          event,
+          instance: getCurrentPluginInstanceDiagnosticId(),
+          ...details,
+        }),
+    );
+  };
+  const readRuntime = (): T | null => {
+    const instanceSlot = getPluginInstanceRuntimeSlot(instanceKey);
+    let source: "instance" | "default-fallback" | "default-no-instance";
+    let runtime: T | null;
+    if (!instanceSlot) {
+      source = "default-no-instance";
+      runtime = (defaultSlot.runtime as T | null) ?? null;
+    } else if (instanceSlot.runtime != null || !resolved.fallbackToDefaultWhenInstanceEmpty) {
+      source = "instance";
+      runtime = (instanceSlot.runtime as T | null) ?? null;
+    } else {
+      source = "default-fallback";
+      runtime = (defaultSlot.runtime as T | null) ?? null;
+    }
+    logDiagnostic("runtime-read", {
+      source,
+      instanceSlotPresent: Boolean(instanceSlot),
+      instanceSlotId: diagnosticObjectId(instanceSlot),
+      instanceSlotHasRuntime: instanceSlot?.runtime != null,
+      instanceRuntimeId: diagnosticObjectId(instanceSlot?.runtime),
+      defaultSlotId: diagnosticObjectId(defaultSlot),
+      defaultSlotHasRuntime: defaultSlot.runtime != null,
+      defaultRuntimeId: diagnosticObjectId(defaultSlot.runtime),
+      selectedRuntimeId: diagnosticObjectId(runtime),
+    });
+    return runtime;
+  };
+
+  return {
+    setRuntime(next: T) {
+      const slot = resolveSlot();
+      slot.runtime = next;
+      logDiagnostic("runtime-set", {
+        target: slot === defaultSlot ? "default" : "instance",
+        slotId: diagnosticObjectId(slot),
+        runtimeId: diagnosticObjectId(next),
+        defaultSlotId: diagnosticObjectId(defaultSlot),
+      });
+    },
+    clearRuntime() {
+      const slot = resolveSlot();
+      const priorRuntime = slot.runtime;
+      slot.runtime = null;
+      logDiagnostic("runtime-clear", {
+        target: slot === defaultSlot ? "default" : "instance",
+        slotId: diagnosticObjectId(slot),
+        priorRuntimeId: diagnosticObjectId(priorRuntime),
+        defaultSlotId: diagnosticObjectId(defaultSlot),
+      });
+    },
+    tryGetRuntime() {
+      return readRuntime();
+    },
+    getRuntime() {
+      const runtime = readRuntime();
+      if (runtime == null) {
+        throw new Error(resolved.errorMessage);
+      }
+      return runtime;
+    },
+  };\`;
+
+  if (!store.includes(readNeedle)) throw new Error("runtime-store diagnostic behavior target not found");
+  store = store.replace(readNeedle, readReplacement);
+  fs.writeFileSync(storePath, store);
+}
+
+// 3) Split controller lookup from active-listener lookup so the failing half is visible.
+let controller = fs.readFileSync(controllerPath, "utf8");
+if (!controller.includes("[wa-runtime-diag]")) {
+  const needle = \`export function getWhatsAppConnectionController(
+  accountId: string,
+): WhatsAppConnectionControllerHandle | null {
+  const context = getChannelRuntimeContext({
+    channelRuntime: getOptionalWhatsAppChannelRuntime() ?? undefined,
+    channelId: "whatsapp",
+    accountId,
+    capability: WHATSAPP_CONNECTION_CONTROLLER_CAPABILITY,
+  });
+  return (context as WhatsAppConnectionControllerHandle | undefined) ?? null;
+}\`;
+  const replacement = \`export function getWhatsAppConnectionController(
+  accountId: string,
+): WhatsAppConnectionControllerHandle | null {
+  const channelRuntime = getOptionalWhatsAppChannelRuntime() ?? undefined;
+  const context = getChannelRuntimeContext({
+    channelRuntime,
+    channelId: "whatsapp",
+    accountId,
+    capability: WHATSAPP_CONNECTION_CONTROLLER_CAPABILITY,
+  });
+  const controller = (context as WhatsAppConnectionControllerHandle | undefined) ?? null;
+  const listener = controller?.getActiveListener() ?? null;
+  console.warn(
+    "[wa-runtime-diag] " +
+      JSON.stringify({
+        event: "controller-lookup",
+        accountId,
+        channelRuntimePresent: Boolean(channelRuntime),
+        controllerPresent: Boolean(controller),
+        listenerPresent: Boolean(listener),
+      }),
+  );
+  return controller;
+}\`;
+  if (!controller.includes(needle)) throw new Error("WhatsApp controller diagnostic target not found");
+  controller = controller.replace(needle, replacement);
+  fs.writeFileSync(controllerPath, controller);
+}
+NODE
+
 RUN pnpm install --no-frozen-lockfile
 # Regression gate: do not build/deploy if runtime-store isolation/fallback tests fail.
 RUN pnpm exec vitest run src/plugin-sdk/runtime-store.test.ts
