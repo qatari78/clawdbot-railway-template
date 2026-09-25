@@ -748,32 +748,114 @@ async function runC1ContextDiagnosticV1() {
       }
       return [];
     };
-
-    let contextPayload = null;
-    for (const message of historyMessages.slice().reverse()) {
-      if (!message || typeof message !== "object" || message.role !== "assistant") {
-        continue;
-      }
-      for (const value of collectText(message)) {
-        const text = value.trim();
+    const parseContextPayloadFromValue = (value) => {
+      for (const candidateText of collectText(value)) {
+        const text = candidateText.trim();
         if (!text.startsWith("{")) continue;
         try {
           const candidate = JSON.parse(text);
-          if (candidate?.report && candidate?.session) {
-            contextPayload = candidate;
-            break;
-          }
+          if (candidate?.report && candidate?.session) return candidate;
         } catch {}
       }
+      return null;
+    };
+
+    const assistantMessages = historyMessages
+      .slice()
+      .reverse()
+      .filter(
+        (message) =>
+          message &&
+          typeof message === "object" &&
+          message.role === "assistant",
+      );
+
+    let contextPayload = null;
+    let fullMessageLookupUsed = false;
+    for (const message of assistantMessages) {
+      contextPayload = parseContextPayloadFromValue(message);
       if (contextPayload) break;
     }
-    if (!contextPayload) throw new Error("context history JSON missing");
+
+    if (!contextPayload) {
+      const matchingTruncated = assistantMessages.find((message) => {
+        const meta =
+          message?.__openclaw &&
+          typeof message.__openclaw === "object" &&
+          !Array.isArray(message.__openclaw)
+            ? message.__openclaw
+            : {};
+        return (
+          typeof meta.id === "string" &&
+          meta.truncated === true &&
+          (meta.idempotencyKey === runId || meta.reason === "oversized")
+        );
+      });
+      const fallbackTruncated =
+        matchingTruncated ??
+        assistantMessages.find((message) => {
+          const meta =
+            message?.__openclaw &&
+            typeof message.__openclaw === "object" &&
+            !Array.isArray(message.__openclaw)
+              ? message.__openclaw
+              : {};
+          return typeof meta.id === "string" && meta.truncated === true;
+        });
+      const messageId = fallbackTruncated?.__openclaw?.id;
+      if (typeof messageId !== "string" || !messageId) {
+        throw new Error("context history JSON missing");
+      }
+
+      stage = "context-message-get";
+      const fullMessageResult = await runCmd(
+        OPENCLAW_NODE,
+        clawArgs([
+          "gateway",
+          "call",
+          "chat.message.get",
+          "--params",
+          JSON.stringify({
+            sessionKey,
+            agentId: "main",
+            messageId,
+            maxChars: 2_000_000,
+          }),
+          "--timeout",
+          "10000",
+          "--json",
+        ]),
+        {
+          env: {
+            ...process.env,
+            OPENCLAW_STATE_DIR: STATE_DIR,
+            OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
+          },
+          timeoutMs: 20_000,
+        },
+      );
+      if (fullMessageResult.code !== 0) {
+        throw new Error("context full-message lookup failed");
+      }
+
+      stage = "parse-context-message-get";
+      const fullMessagePayload = JSON.parse(fullMessageResult.stdout || "{}");
+      if (fullMessagePayload?.ok !== true || !fullMessagePayload?.message) {
+        throw new Error("context full-message unavailable");
+      }
+      contextPayload = parseContextPayloadFromValue(fullMessagePayload.message);
+      if (!contextPayload) {
+        throw new Error("context full-message JSON missing");
+      }
+      fullMessageLookupUsed = true;
+    }
 
     const report = contextPayload.report;
     const session = contextPayload.session;
     const injectedRows = Array.isArray(report.injectedWorkspaceFiles)
       ? report.injectedWorkspaceFiles.map((file) => ({
           name: String(file?.name ?? path.basename(String(file?.path ?? ""))),
+          path: String(file?.path ?? ""),
           rawChars: Number(file?.rawChars ?? 0),
           injectedChars: Number(file?.injectedChars ?? 0),
           tokensApprox: c1EstimateTokensFromChars(Number(file?.injectedChars ?? 0)),
@@ -803,8 +885,9 @@ async function runC1ContextDiagnosticV1() {
     console.log(
       "[c1-context-v1] " +
         JSON.stringify({
-          version: 10,
-          commandPath: "gateway-chat-send-history-context-json",
+          version: 11,
+          commandPath: "gateway-chat-history-message-get-context-json",
+          fullMessageLookupUsed: fullMessageLookupUsed ? 1 : 0,
           modelTurnSubmitted: 0,
           reportSource: String(report?.source ?? "unknown"),
           source: {
