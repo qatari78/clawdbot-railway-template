@@ -9,7 +9,7 @@ import {
   uuidv7,
   writeResearchBrief,
 } from "./jarvis-research-system-v1.js";
-import { resolveOpenRouterKeyForRuntime } from "./openrouter-key-audit.js";
+import { resolveOpenRouterKeyForRuntime } from "./openrouter-key-audit.js";\nimport { verifyResearchSources } from "./jarvis-research-verification-v1.js";
 
 const START="JARVIS_PACKET_START";
 const END="JARVIS_PACKET_END";
@@ -230,7 +230,7 @@ export async function runJarvisResearchCommissioningV1(){
   if(process.env.JARVIS_RESEARCH_COMMISSION_V1?.trim()!=="1")return{ran:false,reason:"disabled"};
 
   const p=researchPaths();
-  const resultPath=path.join(p.diagnostics,"commission-v1.4-openrouter-server-tools.json");
+  const resultPath=path.join(p.diagnostics,"commission-v1.5-openrouter-server-tools.json");
   if(fs.existsSync(resultPath)){
     try{
       const old=JSON.parse(fs.readFileSync(resultPath,"utf8"));
@@ -307,9 +307,10 @@ export async function runJarvisResearchCommissioningV1(){
   }
   if(failures.length)error=failures.join(" | ");
 
-  let merge=null,dossier=null;
+  let merge=null,verification=null,dossier=null;
   if(!error){
     merge=mergeResearchBrief(brief.brief_id);
+    verification=await verifyResearchSources(brief.brief_id);
     dossier=buildResearchDossier(brief.brief_id);
   }
 
@@ -327,6 +328,7 @@ export async function runJarvisResearchCommissioningV1(){
       claim_count:merge.claim_count,
       contradiction_count:merge.contradiction_count
     },
+    verification:error?null:{verification_id:verification.verification_id,reachable_sources:verification.reachable_sources,unreachable_sources:verification.unreachable_sources,numeric_mismatches:verification.numeric_mismatches,source_failures:verification.source_failures},
     dossier:error?null:{dossier_id:dossier.dossier_id,path:dossier.path}
   };
   fs.mkdirSync(path.dirname(resultPath),{recursive:true,mode:0o700});
