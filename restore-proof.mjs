@@ -39,6 +39,7 @@ function inspectTar(gzipData) {
   let entries = 0;
   let configText = null;
   let agentsText = null;
+  const topLevels = new Set();
 
   while (offset + 512 <= tar.length) {
     const header = tar.subarray(offset, offset + 512);
@@ -51,6 +52,9 @@ function inspectTar(gzipData) {
     const fullName = prefix ? `${prefix}/${name}` : name;
 
     if (!fullName) throw new Error("Backup archive contains unnamed entry");
+    const normalizedName = fullName.replace(/^\.\//, "");
+    const topLevel = normalizedName.split("/")[0];
+    if (topLevel && topLevel !== ".") topLevels.add(topLevel);
     if (fullName.startsWith("/") || fullName.split("/").includes("..")) {
       throw new Error(`Unsafe backup archive path: ${fullName}`);
     }
@@ -80,6 +84,11 @@ function inspectTar(gzipData) {
   if (!configText) throw new Error(`Missing ${required[0]}`);
   if (!agentsText || !agentsText.trim()) throw new Error(`Missing or empty ${required[1]}`);
 
+  const requiredTopLevels = [".openclaw", "workspace", "jarvis-research", "agent-workspaces"];
+  for (const name of requiredTopLevels) {
+    if (!topLevels.has(name)) throw new Error(`Missing required /data area: ${name}`);
+  }
+
   const cfg = JSON.parse(configText);
   if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) {
     throw new Error("openclaw.json is not a JSON object");
@@ -89,6 +98,7 @@ function inspectTar(gzipData) {
     entries,
     configBytes: Buffer.byteLength(configText),
     agentsBytes: Buffer.byteLength(agentsText),
+    topLevels: [...topLevels].sort(),
   };
 }
 
@@ -112,6 +122,7 @@ async function run() {
     entries: inspected.entries,
     configBytes: inspected.configBytes,
     agentsBytes: inspected.agentsBytes,
+    topLevels: inspected.topLevels,
   };
 }
 
