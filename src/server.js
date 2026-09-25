@@ -607,19 +607,22 @@ function c1ResolveSkillsPrompt(metadata, prompts) {
   return candidates.find((value) => typeof value === "string") ?? "";
 }
 
-function c1ToolSchemaStats(compiledData) {
-  const tools = Array.isArray(compiledData?.providerVisibleTools)
-    ? compiledData.providerVisibleTools
-    : Array.isArray(compiledData?.tools)
-      ? compiledData.tools
-      : [];
+function c1ToolSchemaStatsFromTools(tools) {
+  const rows = Array.isArray(tools) ? tools : [];
   let schemaChars = 0;
-  for (const tool of tools) {
+  for (const tool of rows) {
     try {
       schemaChars += JSON.stringify(tool?.parameters ?? {}).length;
     } catch {}
   }
-  return { count: tools.length, schemaChars };
+  return { count: rows.length, schemaChars };
+}
+
+function c1MessageRowsFromBranch(branch) {
+  const entries = Array.isArray(branch?.entries) ? branch.entries : [];
+  return entries
+    .filter((entry) => entry?.type === "message" && entry?.message)
+    .map((entry) => entry.message);
 }
 
 async function runC1ContextDiagnosticV1() {
@@ -677,15 +680,15 @@ async function runC1ContextDiagnosticV1() {
     }
 
     stage = "parse-bundle";
-    const manifest = JSON.parse(fs.readFileSync(path.join(outputDir, "manifest.json"), "utf8"));
-    const metadataPath = path.join(outputDir, "metadata.json");
-    const promptsPath = path.join(outputDir, "prompts.json");
-    const metadata = fs.existsSync(metadataPath)
-      ? JSON.parse(fs.readFileSync(metadataPath, "utf8"))
-      : {};
-    const prompts = fs.existsSync(promptsPath)
-      ? JSON.parse(fs.readFileSync(promptsPath, "utf8"))
-      : {};
+    const readJsonIfPresent = (name, fallback) => {
+      const p = path.join(outputDir, name);
+      return fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, "utf8")) : fallback;
+    };
+    const manifest = readJsonIfPresent("manifest.json", {});
+    const metadata = readJsonIfPresent("metadata.json", {});
+    const prompts = readJsonIfPresent("prompts.json", {});
+    const branch = readJsonIfPresent("session-branch.json", {});
+    const toolsFromBundle = readJsonIfPresent("tools.json", []);
     const events = fs
       .readFileSync(path.join(outputDir, "events.jsonl"), "utf8")
       .split(/\r?\n/u)
@@ -693,78 +696,143 @@ async function runC1ContextDiagnosticV1() {
       .map((line) => JSON.parse(line));
 
     stage = "resolve-call";
-    const compiledIndex = events.findLastIndex((event) => {
-      const data = event?.data;
-      return (
-        data &&
-        typeof data === "object" &&
-        typeof data.systemPrompt === "string" &&
-        typeof data.prompt === "string" &&
-        Array.isArray(data.messages)
-      );
-    });
-    if (compiledIndex < 0) {
-      const typeCounts = {};
-      for (const event of events) {
-        const type = typeof event?.type === "string" ? event.type : "<missing>";
-        typeCounts[type] = (typeCounts[type] || 0) + 1;
-      }
-      console.error(
-        "[c1-context-v1] failed=" +
-          JSON.stringify({
-            stage,
-            reason: "no-prompt-bearing-runtime-event",
-            eventCount: events.length,
-            typeCounts,
-          }),
-      );
-      return;
-    }
+    const compiledIndex = events.findLastIndex((event) => event?.type === "context.compiled");
+    if (compiledIndex < 0) throw new Error("missing context.compiled");
     const compiled = events[compiledIndex];
     const compiledData = compiled?.data ?? {};
-    const systemPrompt = compiledData.systemPrompt;
-    const currentPrompt = compiledData.prompt;
-    const messages = compiledData.messages;
+
+    const systemPrompt =
+      (typeof prompts?.system === "string" && prompts.system) ||
+      (typeof compiledData?.systemPrompt === "string" && compiledData.systemPrompt) ||
+      (() => {
+        const p = path.join(outputDir, "system-prompt.txt");
+        return fs.existsSync(p) ? fs.readFileSync(p, "utf8") : "";
+      })();
+
+    const latestSubmittedPrompt =
+      (typeof prompts?.latestSubmittedPrompt === "string" && prompts.latestSubmittedPrompt) ||
+      (typeof compiledData?.prompt === "string" && compiledData.prompt) ||
+      "";
+
+    const report =
+      (metadata?.prompting?.systemPromptReport &&
+      typeof metadata.prompting.systemPromptReport === "object"
+        ? metadata.prompting.systemPromptReport
+        : null) ??
+      (prompts?.systemPromptReport && typeof prompts.systemPromptReport === "object"
+        ? prompts.systemPromptReport
+        : null);
 
     const completed =
       [...events]
         .slice(compiledIndex + 1)
-        .reverse()
         .find(
           (event) =>
             event?.type === "model.completed" &&
             (!compiled?.runId || !event?.runId || event.runId === compiled.runId),
-        ) ?? null;
+        ) ??
+      [...events].reverse().find((event) => event?.type === "model.completed") ??
+      null;
 
     stage = "measure";
-    const injectedRows = c1ParseInjectedProjectFiles(systemPrompt, workspaceFiles);
+    const limitsFromConfig = c1ResolveBootstrapLimits();
+    const limits = {
+      bootstrapMaxChars:
+        Number(report?.bootstrapMaxChars) > 0
+          ? Number(report.bootstrapMaxChars)
+          : limitsFromConfig.bootstrapMaxChars,
+      bootstrapTotalMaxChars:
+        Number(report?.bootstrapTotalMaxChars) > 0
+          ? Number(report.bootstrapTotalMaxChars)
+          : limitsFromConfig.bootstrapTotalMaxChars,
+      userBootstrapMaxChars: limitsFromConfig.userBootstrapMaxChars,
+    };
+
+    let injectedRows = [];
+    if (Array.isArray(report?.injectedWorkspaceFiles)) {
+      injectedRows = report.injectedWorkspaceFiles.map((file) => {
+        const injectedChars =
+          typeof file?.injectedChars === "number" ? file.injectedChars : 0;
+        return {
+          name: String(file?.name ?? path.basename(String(file?.path ?? ""))),
+          rawChars: Number(file?.rawChars ?? 0),
+          injectedChars,
+          tokensApprox: c1EstimateTokensFromChars(injectedChars),
+          truncated: file?.truncated === true ? 1 : 0,
+          missing: file?.missing === true ? 1 : 0,
+          verified: file?.injectionStatus === "native_unverified" ? 0 : 1,
+        };
+      });
+    } else {
+      injectedRows = c1ParseInjectedProjectFiles(systemPrompt, workspaceFiles).map((row) => ({
+        ...row,
+        verified: 0,
+      }));
+    }
     const injectedCharsTotal = injectedRows.reduce((sum, row) => sum + row.injectedChars, 0);
 
     const skillsPrompt = c1ResolveSkillsPrompt(metadata, prompts);
-    const skillsChars = skillsPrompt.length;
-    const skillsCount = Array.from(skillsPrompt.matchAll(/<skill>[\s\S]*?<\/skill>/giu)).length;
+    const skillsChars =
+      typeof report?.skills?.promptChars === "number"
+        ? report.skills.promptChars
+        : skillsPrompt.length;
+    const skillsCount = Array.isArray(report?.skills?.entries)
+      ? report.skills.entries.length
+      : Array.from(skillsPrompt.matchAll(/<skill>[\s\S]*?<\/skill>/giu)).length;
 
-    const toolStats = c1ToolSchemaStats(compiledData);
-    const systemPromptTotalChars = systemPrompt.length;
-    const systemBaseChars = Math.max(
-      0,
-      systemPromptTotalChars - skillsChars - injectedCharsTotal,
+    const bundleToolStats = c1ToolSchemaStatsFromTools(
+      Array.isArray(toolsFromBundle)
+        ? toolsFromBundle
+        : Array.isArray(compiledData?.tools)
+          ? compiledData.tools
+          : [],
     );
+    const toolSchemaChars =
+      typeof report?.tools?.schemaChars === "number"
+        ? report.tools.schemaChars
+        : bundleToolStats.schemaChars;
+    const toolCount = Array.isArray(report?.tools?.entries)
+      ? report.tools.entries.length
+      : bundleToolStats.count;
 
-    const memoryRecallChars = c1ActiveMemoryChars(currentPrompt);
-    const transcriptHistoryChars = messages.reduce(
+    const systemPromptTotalChars =
+      typeof report?.systemPrompt?.chars === "number"
+        ? report.systemPrompt.chars
+        : systemPrompt.length;
+    const projectContextChars =
+      typeof report?.systemPrompt?.projectContextChars === "number"
+        ? report.systemPrompt.projectContextChars
+        : injectedCharsTotal;
+    const nonProjectContextChars =
+      typeof report?.systemPrompt?.nonProjectContextChars === "number"
+        ? report.systemPrompt.nonProjectContextChars
+        : Math.max(0, systemPromptTotalChars - projectContextChars);
+    const projectFrameChars = Math.max(0, projectContextChars - injectedCharsTotal);
+    const systemBaseChars =
+      Math.max(0, nonProjectContextChars - skillsChars) + projectFrameChars;
+
+    const runtimeContextChars = Number(report?.currentTurn?.runtimeContextChars ?? 0);
+    const modelOnlyPromptChars = Number(report?.currentTurn?.modelOnlyPromptChars ?? 0);
+    const memoryRecallChars = Math.min(
+      modelOnlyPromptChars,
+      c1ActiveMemoryChars(latestSubmittedPrompt),
+    );
+    const otherModelOnlyChars = Math.max(0, modelOnlyPromptChars - memoryRecallChars);
+
+    const messages = c1MessageRowsFromBranch(branch);
+    const transcriptChars = messages.reduce(
       (sum, message) => sum + c1EstimateMessageChars(message),
       0,
     );
-    const currentPromptTranscriptChars = Math.max(0, currentPrompt.length - memoryRecallChars);
-    const transcriptChars = transcriptHistoryChars + currentPromptTranscriptChars;
 
     const setupFloorChars =
       systemBaseChars +
       skillsChars +
       injectedCharsTotal +
-      toolStats.schemaChars +
-      memoryRecallChars;
+      toolSchemaChars +
+      runtimeContextChars +
+      memoryRecallChars +
+      otherModelOnlyChars;
     const accountedChars = setupFloorChars + transcriptChars;
 
     const completionUsage = completed?.data?.usage ?? completed?.data ?? {};
@@ -788,13 +856,13 @@ async function runC1ContextDiagnosticV1() {
       "total",
     ]);
 
-    const limits = c1ResolveBootstrapLimits();
     const result = {
-      version: 3,
+      version: 4,
       manifest: {
         eventCount: Number(manifest.eventCount ?? 0),
         runtimeEventCount: Number(manifest.runtimeEventCount ?? 0),
         transcriptEventCount: Number(manifest.transcriptEventCount ?? 0),
+        contextCompiledEvents: events.filter((event) => event?.type === "context.compiled").length,
       },
       limits,
       source: {
@@ -802,6 +870,7 @@ async function runC1ContextDiagnosticV1() {
           totalCharsRendered: systemPromptTotalChars,
           charsExclusive: systemBaseChars,
           tokensApprox: c1EstimateTokensFromChars(systemBaseChars),
+          projectFrameChars,
         },
         skillsPrompt: {
           chars: skillsChars,
@@ -809,22 +878,28 @@ async function runC1ContextDiagnosticV1() {
           count: skillsCount,
         },
         toolSchemas: {
-          chars: toolStats.schemaChars,
-          tokensApprox: c1EstimateTokensFromChars(toolStats.schemaChars),
-          count: toolStats.count,
+          chars: toolSchemaChars,
+          tokensApprox: c1EstimateTokensFromChars(toolSchemaChars),
+          count: toolCount,
         },
         injectedWorkspaceFiles: injectedRows,
         injectedWorkspaceFilesTotal: {
           chars: injectedCharsTotal,
           tokensApprox: c1EstimateTokensFromChars(injectedCharsTotal),
         },
+        runtimeContext: {
+          chars: runtimeContextChars,
+          tokensApprox: c1EstimateTokensFromChars(runtimeContextChars),
+        },
         memoryRecall: {
           chars: memoryRecallChars,
           tokensApprox: c1EstimateTokensFromChars(memoryRecallChars),
         },
+        otherModelOnlyPrompt: {
+          chars: otherModelOnlyChars,
+          tokensApprox: c1EstimateTokensFromChars(otherModelOnlyChars),
+        },
         transcript: {
-          historyChars: transcriptHistoryChars,
-          currentPromptChars: currentPromptTranscriptChars,
           chars: transcriptChars,
           tokensApprox: c1EstimateTokensFromChars(transcriptChars),
           messages: messages.length,
@@ -838,6 +913,7 @@ async function runC1ContextDiagnosticV1() {
         actualInputTokens: actualInputTokens ?? 0,
         actualOutputTokens: actualOutputTokens ?? 0,
         actualTotalTokens: actualTotalTokens ?? 0,
+        systemPromptReportPresent: report ? 1 : 0,
       },
       workspaceFiles,
     };
