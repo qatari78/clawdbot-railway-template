@@ -985,6 +985,7 @@ async function runC1ContextDiagnosticV1(measurement = "current") {
           },
         }),
     );
+    return true;
   } catch (err) {
     console.error(
       "[c1-context-v1] failed=" +
@@ -993,6 +994,7 @@ async function runC1ContextDiagnosticV1(measurement = "current") {
           errorClass: err?.constructor?.name || "Error",
         }),
     );
+    return false;
   } finally {
     try {
       fs.rmSync(trajectoryWorkspace, { recursive: true, force: true });
@@ -1004,6 +1006,7 @@ async function runC1ContextDiagnosticV1(measurement = "current") {
 async function runC1FreshFloorV1() {
   const sessionKey = "agent:main:main";
   const markerPath = path.join(STATE_DIR, "c1-fresh-floor-v1.json");
+  const measuredMarkerPath = path.join(STATE_DIR, "c1-fresh-floor-v1.measured.json");
   const deploymentId = process.env.RAILWAY_DEPLOYMENT_ID || String(process.pid);
   const baseRunId = "c1-fresh-floor-" + deploymentId;
   const gatewayEnv = {
@@ -1025,8 +1028,38 @@ async function runC1FreshFloorV1() {
     try {
       state = JSON.parse(fs.readFileSync(markerPath, "utf8"))?.state || state;
     } catch {}
-    console.log("[c1-fresh-floor-v1] skipped marker=" + state);
-    return;
+
+    if (state === "completed" && !fs.existsSync(measuredMarkerPath)) {
+      console.log("[c1-fresh-floor-v1] pending-measure");
+      const measured = await runC1ContextDiagnosticV1("fresh-floor");
+      if (!measured) {
+        console.error("[c1-fresh-floor-v1] measurement=failed");
+        return false;
+      }
+      fs.writeFileSync(
+        measuredMarkerPath,
+        JSON.stringify(
+          {
+            state: "measured",
+            deploymentId,
+            at: new Date().toISOString(),
+          },
+          null,
+          2,
+        ) + "\n",
+        { encoding: "utf8", mode: 0o600 },
+      );
+      console.log("[c1-fresh-floor-v1] measurement=completed");
+      return true;
+    }
+
+    console.log(
+      "[c1-fresh-floor-v1] skipped marker=" +
+        state +
+        " measured=" +
+        (fs.existsSync(measuredMarkerPath) ? "yes" : "no"),
+    );
+    return true;
   }
 
   let stage = "marker";
@@ -1076,12 +1109,9 @@ async function runC1FreshFloorV1() {
     if (turnResult.code !== 0) throw new Error("one-line turn failed");
     console.log("[c1-fresh-floor-v1] one-line-turn=ok");
 
-    await sleep(750);
-    stage = "measure";
-    await runC1ContextDiagnosticV1("fresh-floor");
-
-    writeMarker("completed", { stage: "complete" });
-    console.log("[c1-fresh-floor-v1] completed");
+    writeMarker("completed", { stage: "awaiting-measure" });
+    console.log("[c1-fresh-floor-v1] completed measurement=deferred");
+    return false;
   } catch (err) {
     writeMarker("failed", {
       stage,
@@ -1091,6 +1121,7 @@ async function runC1FreshFloorV1() {
       "[c1-fresh-floor-v1] failed=" +
         JSON.stringify({ stage, errorClass: err?.constructor?.name || "Error" }),
     );
+    return false;
   }
 }
 
@@ -2939,8 +2970,8 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
       await ensureGatewayRunning();
       console.log("[wrapper] gateway ready");
       await runJarvisMainSessionRecoveryV1();
-      await runC1ContextDiagnosticV1("current");
-      await runC1FreshFloorV1();
+      const c1FreshReady = await runC1FreshFloorV1();
+      if (c1FreshReady) await runC1ContextDiagnosticV1("current");
       launchOpenRouterKeyAuditV1();
       launchJarvisSecurityAuditV1();
       launchJarvisAgentSmokeV1();
@@ -2956,8 +2987,8 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
           await ensureGatewayRunning();
           console.log("[wrapper] gateway ready after retry");
           clearInterval(gatewayRetryTimer);
-          await runC1ContextDiagnosticV1("current");
-          await runC1FreshFloorV1();
+          const c1FreshReady = await runC1FreshFloorV1();
+          if (c1FreshReady) await runC1ContextDiagnosticV1("current");
           launchJarvisSecurityAuditV1();
           launchJarvisAgentSmokeV1();
           launchJarvisAdviserMemoryCommissioningV1();
