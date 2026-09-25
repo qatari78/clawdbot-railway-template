@@ -1390,20 +1390,27 @@ app.get("/setup/export", requireExportAuth, async (_req, res) => {
   }
 
   const cwd = dataRoot;
-  const paths = fs.readdirSync(dataRoot).sort();
-  if (paths.length === 0) {
+  const topLevel = fs.readdirSync(dataRoot).sort();
+  if (topLevel.length === 0) {
     return res.status(500).type("text/plain").send("/data volume is empty\n");
   }
+  console.log("[export] full /data backup top-level=" + JSON.stringify(topLevel));
 
+  // Archive the volume root itself so dotfiles and every subtree are included.
+  // Strict mode turns unreadable/skipped entries into a failed backup instead of
+  // silently producing a partial archive.
   const stream = tar.c(
     {
       gzip: true,
       portable: true,
       noMtime: true,
       cwd,
-      onwarn: () => {},
+      strict: true,
+      onwarn: (code, message) => {
+        console.warn("[export] tar warning " + String(code) + ": " + String(message));
+      },
     },
-    paths,
+    ["."],
   );
 
   stream.on("error", (err) => {
