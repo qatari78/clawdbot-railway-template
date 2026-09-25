@@ -83,7 +83,7 @@ Primary research:
 - Build one de-identified neutral brief with question, jurisdiction/period/definitions/comparison scope, stakes, freshness and date.
 - Do not include adviser views, transcript, shared sub-questions, previous conclusions or the other researcher's output.
 - Production entry point: write that neutral brief as JSON, then run node /app/src/jarvis-research-runner.js run <brief-json-path> <verifier|dual|heavy>.
-- The runner dispatches Verifier and Scout concurrently and independently through OpenRouter server-side research tools, ingests their packets, merges evidence, writes run telemetry and returns the compact dossier.
+- The runner dispatches Verifier and Scout concurrently and independently through OpenRouter server-side research tools, ingests their packets, merges evidence, performs mechanical source verification, writes run telemetry and returns the compact dossier.
 - dual is the default for evidence-needing room questions; use verifier only for a specific source/document; use heavy for high stakes, exhaustive maps, multiple long documents or unresolved material contradictions.
 - Researchers are stateless: skills persist, evidence/cache persist, personal memory does not.
 
