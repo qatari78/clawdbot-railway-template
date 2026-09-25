@@ -733,7 +733,7 @@ async function runC1ContextDiagnosticV1() {
     if (historyResult.code !== 0) throw new Error("context history failed");
 
     stage = "parse-context-history";
-    const historyPayload = JSON.parse(historyResult.stdout || "{}");
+    const historyPayload = JSON.parse(historyResult.output || "{}");
     const historyMessages = Array.isArray(historyPayload?.messages)
       ? historyPayload.messages
       : [];
@@ -886,7 +886,7 @@ async function runC1ContextDiagnosticV1() {
       }
 
       stage = "parse-context-message-get";
-      const fullMessagePayload = JSON.parse(fullMessageResult.stdout || "{}");
+      const fullMessagePayload = JSON.parse(fullMessageResult.output || "{}");
       if (fullMessagePayload?.ok !== true || !fullMessagePayload?.message) {
         throw new Error("context full-message unavailable");
       }
