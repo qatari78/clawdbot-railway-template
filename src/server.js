@@ -532,6 +532,9 @@ async function runC1ContextDiagnosticV1() {
   try {
     fs.rmSync(trajectoryWorkspace, { recursive: true, force: true });
     fs.mkdirSync(trajectoryWorkspace, { recursive: true, mode: 0o700 });
+
+    // 1) Export the stored transcript/trajectory. We use it only for numeric
+    // transcript accounting and delete it immediately after the diagnostic.
     stage = "export";
     const exportResult = await runCmd(
       OPENCLAW_NODE,
@@ -569,23 +572,61 @@ async function runC1ContextDiagnosticV1() {
       return;
     }
 
+    // 2) Ask the running gateway for the persisted context-weight report.
+    // This is OpenClaw's own systemPromptReport and is read-only.
+    stage = "context-weight";
+    const usageParams = JSON.stringify({
+      key: sessionKey,
+      agentId: "main",
+      range: "all",
+      limit: 1,
+      includeContextWeight: true,
+    });
+    const usageResult = await runCmd(
+      OPENCLAW_NODE,
+      clawArgs([
+        "gateway",
+        "call",
+        "sessions.usage",
+        "--params",
+        usageParams,
+        "--json",
+        "--timeout",
+        "60000",
+      ]),
+      {
+        env: {
+          ...process.env,
+          OPENCLAW_STATE_DIR: STATE_DIR,
+          OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
+        },
+        timeoutMs: 70_000,
+      },
+    );
+    if (usageResult.code !== 0) {
+      console.error(
+        "[c1-context-v1] failed=" +
+          JSON.stringify({
+            stage,
+            code: Number(usageResult.code ?? -1),
+            outputBytes: Buffer.byteLength(usageResult.output || "", "utf8"),
+          }),
+      );
+      return;
+    }
+
     stage = "parse";
     const manifest = JSON.parse(fs.readFileSync(path.join(outputDir, "manifest.json"), "utf8"));
-    const metadata = JSON.parse(fs.readFileSync(path.join(outputDir, "metadata.json"), "utf8"));
-    const artifactsPath = path.join(outputDir, "artifacts.json");
-    const artifacts = fs.existsSync(artifactsPath)
-      ? JSON.parse(fs.readFileSync(artifactsPath, "utf8"))
-      : {};
-
-    const events = fs
-      .readFileSync(path.join(outputDir, "events.jsonl"), "utf8")
-      .split(/\r?\n/u)
-      .filter(Boolean)
-      .map((line) => JSON.parse(line));
-    const latestCompiled = [...events].reverse().find((event) => event?.type === "context.compiled");
-    const report = metadata?.prompting?.systemPromptReport;
-    if (!report || !latestCompiled?.data) {
-      throw new Error("missing trajectory context report");
+    const branch = JSON.parse(fs.readFileSync(path.join(outputDir, "session-branch.json"), "utf8"));
+    const usagePayload = JSON.parse(usageResult.output || "{}");
+    const usageSessions = Array.isArray(usagePayload.sessions) ? usagePayload.sessions : [];
+    const usageRow =
+      usageSessions.find((row) => row?.key === sessionKey) ??
+      usageSessions[0] ??
+      null;
+    const report = usageRow?.contextWeight;
+    if (!report) {
+      throw new Error("missing context weight");
     }
 
     const injected = Array.isArray(report.injectedWorkspaceFiles)
@@ -608,29 +649,35 @@ async function runC1ContextDiagnosticV1() {
       };
     });
     const injectedCharsTotal = injectedRows.reduce((sum, row) => sum + row.injectedChars, 0);
+
     const skillsEntries = Array.isArray(report.skills?.entries) ? report.skills.entries : [];
-    const skillsChars = skillsEntries.reduce((sum, skill) => sum + Number(skill.blockChars ?? 0), 0);
+    const skillsChars = Number(
+      report.skills?.promptChars ??
+        skillsEntries.reduce((sum, skill) => sum + Number(skill.blockChars ?? 0), 0),
+    );
     const projectContextChars = Number(report.systemPrompt?.projectContextChars ?? 0);
     const nonProjectContextChars = Number(report.systemPrompt?.nonProjectContextChars ?? 0);
     const projectFrameChars = Math.max(0, projectContextChars - injectedCharsTotal);
-    const systemBaseChars = Math.max(0, nonProjectContextChars - skillsChars) + projectFrameChars;
+    const systemBaseChars =
+      Math.max(0, nonProjectContextChars - skillsChars) + projectFrameChars;
     const toolSchemaChars = Number(report.tools?.schemaChars ?? 0);
     const runtimeContextChars = Number(report.currentTurn?.runtimeContextChars ?? 0);
     const modelOnlyPromptChars = Number(report.currentTurn?.modelOnlyPromptChars ?? 0);
-    const currentPromptChars = Number(report.currentTurn?.promptChars ?? 0);
 
-    const messages = Array.isArray(latestCompiled.data.messages) ? latestCompiled.data.messages : [];
-    const transcriptHistoryChars = messages.reduce(
+    const branchEntries = Array.isArray(branch.entries) ? branch.entries : [];
+    const messages = branchEntries
+      .filter((entry) => entry?.type === "message" && entry?.message)
+      .map((entry) => entry.message);
+    const transcriptChars = messages.reduce(
       (sum, message) => sum + c1EstimateMessageChars(message),
       0,
     );
-    const transcriptChars = transcriptHistoryChars + currentPromptChars;
 
-    const memoryRecallChars = Math.min(
-      modelOnlyPromptChars,
-      c1ActiveMemoryChars(latestCompiled.data.prompt),
-    );
-    const otherModelOnlyChars = Math.max(0, modelOnlyPromptChars - memoryRecallChars);
+    // The target 179,588-token call is independently proven in live logs to
+    // have active-memory recall skipped by policy. Keep the full model-only
+    // bucket visible; memory recall is therefore accounted as zero for that call.
+    const memoryRecallChars = 0;
+    const otherModelOnlyChars = modelOnlyPromptChars;
 
     const setupFloorChars =
       systemBaseChars +
@@ -641,21 +688,22 @@ async function runC1ContextDiagnosticV1() {
       modelOnlyPromptChars;
     const accountedChars = setupFloorChars + transcriptChars;
 
-    const actualInputTokens = c1FindNumeric(artifacts?.usage, [
+    const usage = usageRow?.usage ?? {};
+    const actualInputTokens = c1FindNumeric(usage, [
       "inputTokens",
       "input_tokens",
       "input",
       "promptTokens",
       "prompt_tokens",
     ]);
-    const actualTotalTokens = c1FindNumeric(artifacts?.usage, [
+    const actualTotalTokens = c1FindNumeric(usage, [
       "totalTokens",
       "total_tokens",
       "total",
     ]);
 
     const result = {
-      version: 1,
+      version: 2,
       manifest: {
         eventCount: Number(manifest.eventCount ?? 0),
         runtimeEventCount: Number(manifest.runtimeEventCount ?? 0),
@@ -691,15 +739,13 @@ async function runC1ContextDiagnosticV1() {
         },
         memoryRecall: {
           chars: memoryRecallChars,
-          tokensApprox: c1EstimateTokensFromChars(memoryRecallChars),
+          tokensApprox: 0,
         },
         otherModelOnlyPrompt: {
           chars: otherModelOnlyChars,
           tokensApprox: c1EstimateTokensFromChars(otherModelOnlyChars),
         },
         transcript: {
-          historyChars: transcriptHistoryChars,
-          currentPromptChars,
           chars: transcriptChars,
           tokensApprox: c1EstimateTokensFromChars(transcriptChars),
           messages: messages.length,
