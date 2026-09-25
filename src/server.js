@@ -1372,15 +1372,41 @@ function requireExportAuth(req, res, next) {
   return requireSetupAuth(req, res, next);
 }
 
+async function createFullDataArchive(dataRoot, archivePath) {
+  return await new Promise((resolve, reject) => {
+    const child = childProcess.spawn(
+      "tar",
+      [
+        "--create",
+        "--gzip",
+        "--file",
+        archivePath,
+        "--directory",
+        dataRoot,
+        "--warning=no-file-changed",
+        ".",
+      ],
+      { stdio: ["ignore", "ignore", "pipe"] },
+    );
+
+    let stderrBytes = 0;
+    child.stderr?.on("data", (chunk) => {
+      stderrBytes += chunk.length;
+    });
+    child.once("error", reject);
+    child.once("close", (code, signal) => {
+      resolve({
+        code: Number.isInteger(code) ? code : 2,
+        signal: signal || null,
+        stderrBytes,
+      });
+    });
+  });
+}
+
 app.get("/setup/export", requireExportAuth, async (_req, res) => {
   fs.mkdirSync(STATE_DIR, { recursive: true });
   fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
-
-  res.setHeader("content-type", "application/gzip");
-  res.setHeader(
-    "content-disposition",
-    `attachment; filename="openclaw-backup-${new Date().toISOString().replace(/[:.]/g, "-")}.tar.gz"`,
-  );
 
   // Export the entire Railway persistent volume. A recovery archive must cover
   // every /data area, not only OpenClaw state/workspace.
@@ -1389,37 +1415,80 @@ app.get("/setup/export", requireExportAuth, async (_req, res) => {
     return res.status(500).type("text/plain").send("/data volume is not mounted\n");
   }
 
-  const cwd = dataRoot;
   const topLevel = fs.readdirSync(dataRoot).sort();
   if (topLevel.length === 0) {
     return res.status(500).type("text/plain").send("/data volume is empty\n");
   }
   console.log("[export] full /data backup top-level=" + JSON.stringify(topLevel));
 
-  // Archive the volume root itself so dotfiles and every subtree are included.
-  // Strict mode turns unreadable/skipped entries into a failed backup instead of
-  // silently producing a partial archive.
-  const stream = tar.c(
-    {
-      gzip: true,
-      portable: true,
-      noMtime: true,
-      cwd,
-      strict: true,
-      onwarn: (code, message) => {
-        console.warn("[export] tar warning " + String(code) + ": " + String(message));
-      },
-    },
-    ["."],
+  // GNU tar uses exit 1 for recoverable file-change conditions and exit 2 for
+  // fatal errors. Build to /tmp first so a failed attempt never sends a partial
+  // HTTP archive. Retry exit 1 once; any exit 2 (or a second exit 1) fails.
+  const archivePath = path.join(
+    os.tmpdir(),
+    `openclaw-export-${process.pid}-${Date.now()}.tar.gz`,
   );
+  const cleanup = () => {
+    try { fs.rmSync(archivePath, { force: true }); } catch {}
+  };
 
-  stream.on("error", (err) => {
-    console.error("[export]", err);
-    if (!res.headersSent) res.status(500);
-    res.end(String(err));
-  });
+  try {
+    let result = null;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      cleanup();
+      result = await createFullDataArchive(dataRoot, archivePath);
+      console.log(
+        `[export] tar attempt=${attempt} exit=${result.code} stderrBytes=${result.stderrBytes}`,
+      );
 
-  stream.pipe(res);
+      if (result.code === 0) break;
+      if (result.code === 1 && attempt === 1) {
+        console.warn("[export] tar exit 1; retrying full archive once");
+        await sleep(250);
+        continue;
+      }
+
+      if (result.code === 2) {
+        throw new Error("tar failed with fatal exit 2");
+      }
+      if (result.code === 1) {
+        throw new Error("tar exit 1 persisted after retry");
+      }
+      throw new Error(
+        `tar failed with unexpected exit ${result.code}${result.signal ? ` signal=${result.signal}` : ""}`,
+      );
+    }
+
+    const stat = fs.statSync(archivePath);
+    if (!stat.isFile() || stat.size <= 0) {
+      throw new Error("tar produced an empty archive");
+    }
+
+    res.setHeader("content-type", "application/gzip");
+    res.setHeader("content-length", String(stat.size));
+    res.setHeader(
+      "content-disposition",
+      `attachment; filename="openclaw-backup-${new Date().toISOString().replace(/[:.]/g, "-")}.tar.gz"`,
+    );
+
+    const stream = fs.createReadStream(archivePath);
+    stream.on("error", (err) => {
+      console.error("[export] archive read failed", err);
+      cleanup();
+      if (!res.headersSent) res.status(500);
+      res.end("Backup archive read failed\n");
+    });
+    res.once("finish", cleanup);
+    res.once("close", cleanup);
+    stream.pipe(res);
+  } catch (err) {
+    cleanup();
+    console.error("[export] backup failed: " + String(err));
+    if (!res.headersSent) {
+      return res.status(500).type("text/plain").send("Backup export failed\n");
+    }
+    res.end();
+  }
 });
 
 function isUnderDir(p, root) {
