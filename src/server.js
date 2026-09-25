@@ -517,14 +517,109 @@ function c1WorkspaceFileSizes(root) {
 }
 
 
-function c1ParseCliJson(output) {
-  const text = String(output || "");
-  const first = text.indexOf("{");
-  const last = text.lastIndexOf("}");
-  if (first < 0 || last < first) {
-    throw new Error("no JSON object found");
+function c1ParseInjectedProjectFiles(systemPrompt, workspaceFiles) {
+  if (typeof systemPrompt !== "string" || !systemPrompt) return [];
+  const marker = "# Project Context";
+  const markerIndex = systemPrompt.indexOf(marker);
+  if (markerIndex < 0) return [];
+
+  const silentIndex = systemPrompt.indexOf("\n## Silent Replies\n", markerIndex);
+  const section = systemPrompt.slice(
+    markerIndex,
+    silentIndex >= 0 ? silentIndex : systemPrompt.length,
+  );
+
+  const headingRe = /^## (.+\.md)\r?$/gmu;
+  const headings = [];
+  let match;
+  while ((match = headingRe.exec(section)) !== null) {
+    headings.push({
+      index: match.index,
+      end: match.index + match[0].length,
+      pathLabel: String(match[1] || ""),
+    });
   }
-  return JSON.parse(text.slice(first, last + 1));
+
+  return headings.map((heading, index) => {
+    const nextIndex = headings[index + 1]?.index ?? section.length;
+    let payload = section.slice(heading.end, nextIndex);
+    payload = payload.replace(/^\r?\n\r?\n/u, "").replace(/(?:\r?\n)+$/u, "");
+
+    let relativePath = heading.pathLabel
+      .replace(/^\$WORKSPACE_DIR[\\/]/u, "")
+      .replace(/^\/data\/workspace\//u, "")
+      .replace(/\\/g, "/");
+    if (relativePath.startsWith("/") || relativePath.split("/").includes("..")) {
+      relativePath = path.basename(relativePath);
+    }
+
+    const liveEntry =
+      workspaceFiles.find((entry) => entry.path === relativePath) ??
+      workspaceFiles.find((entry) => path.basename(entry.path) === path.basename(relativePath));
+    let rawChars = 0;
+    if (liveEntry) {
+      const full = path.resolve(WORKSPACE_DIR, liveEntry.path);
+      const root = path.resolve(WORKSPACE_DIR);
+      if (full === root || full.startsWith(root + path.sep)) {
+        try {
+          rawChars = fs.readFileSync(full, "utf8").length;
+        } catch {}
+      }
+    }
+
+    return {
+      name: relativePath || path.basename(heading.pathLabel),
+      rawChars,
+      injectedChars: payload.length,
+      tokensApprox: c1EstimateTokensFromChars(payload.length),
+      truncated: /\btruncated\b/iu.test(payload) ? 1 : 0,
+      missing: /^\[MISSING\]/u.test(payload) ? 1 : 0,
+    };
+  });
+}
+
+function c1ResolveBootstrapLimits() {
+  let cfg = {};
+  try {
+    cfg = JSON.parse(fs.readFileSync(configPath(), "utf8"));
+  } catch {}
+  const defaults = cfg?.agents?.defaults ?? {};
+  const main = cfg?.agents?.entries?.main ?? {};
+  const positive = (value, fallback) =>
+    typeof value === "number" && Number.isFinite(value) && value > 0
+      ? Math.floor(value)
+      : fallback;
+  return {
+    bootstrapMaxChars: positive(main.bootstrapMaxChars ?? defaults.bootstrapMaxChars, 20000),
+    bootstrapTotalMaxChars: positive(
+      main.bootstrapTotalMaxChars ?? defaults.bootstrapTotalMaxChars,
+      60000,
+    ),
+    userBootstrapMaxChars: 4000,
+  };
+}
+
+function c1ResolveSkillsPrompt(metadata, prompts) {
+  const candidates = [
+    metadata?.prompting?.skillsPrompt,
+    prompts?.skillsPrompt,
+  ];
+  return candidates.find((value) => typeof value === "string") ?? "";
+}
+
+function c1ToolSchemaStats(compiledData) {
+  const tools = Array.isArray(compiledData?.providerVisibleTools)
+    ? compiledData.providerVisibleTools
+    : Array.isArray(compiledData?.tools)
+      ? compiledData.tools
+      : [];
+  let schemaChars = 0;
+  for (const tool of tools) {
+    try {
+      schemaChars += JSON.stringify(tool?.parameters ?? {}).length;
+    } catch {}
+  }
+  return { count: tools.length, schemaChars };
 }
 
 async function runC1ContextDiagnosticV1() {
@@ -538,14 +633,12 @@ async function runC1ContextDiagnosticV1() {
     outputName,
   );
   const workspaceFiles = c1WorkspaceFileSizes(WORKSPACE_DIR);
-
   let stage = "prepare";
+
   try {
     fs.rmSync(trajectoryWorkspace, { recursive: true, force: true });
     fs.mkdirSync(trajectoryWorkspace, { recursive: true, mode: 0o700 });
 
-    // 1) Export the stored transcript/trajectory. We use it only for numeric
-    // transcript accounting and delete it immediately after the diagnostic.
     stage = "export";
     const exportResult = await runCmd(
       OPENCLAW_NODE,
@@ -583,183 +676,131 @@ async function runC1ContextDiagnosticV1() {
       return;
     }
 
-    // 2) Ask the running gateway for the persisted context-weight report.
-    // This is OpenClaw's own systemPromptReport and is read-only.
-    stage = "context-weight";
-    const usageParams = JSON.stringify({
-      key: sessionKey,
-      agentId: "main",
-      range: "all",
-      limit: 1,
-      includeContextWeight: true,
-    });
-    const usageResult = await runCmd(
-      OPENCLAW_NODE,
-      clawArgs([
-        "gateway",
-        "call",
-        "sessions.usage",
-        "--params",
-        usageParams,
-        "--json",
-        "--timeout",
-        "60000",
-      ]),
-      {
-        env: {
-          ...process.env,
-          OPENCLAW_STATE_DIR: STATE_DIR,
-          OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
-        },
-        timeoutMs: 70_000,
-      },
-    );
-    if (usageResult.code !== 0) {
-      console.error(
-        "[c1-context-v1] failed=" +
-          JSON.stringify({
-            stage,
-            code: Number(usageResult.code ?? -1),
-            outputBytes: Buffer.byteLength(usageResult.output || "", "utf8"),
-          }),
-      );
-      return;
-    }
-
-    stage = "parse-manifest";
+    stage = "parse-bundle";
     const manifest = JSON.parse(fs.readFileSync(path.join(outputDir, "manifest.json"), "utf8"));
-    stage = "parse-branch";
-    const branch = JSON.parse(fs.readFileSync(path.join(outputDir, "session-branch.json"), "utf8"));
-    stage = "parse-usage";
-    const usagePayload = c1ParseCliJson(usageResult.output);
-    stage = "resolve-context-weight";
-    const usageSessions = Array.isArray(usagePayload.sessions) ? usagePayload.sessions : [];
-    const usageRow =
-      usageSessions.find((row) => row?.key === sessionKey) ??
-      usageSessions[0] ??
-      null;
-    const report = usageRow?.contextWeight;
-    if (!report) {
-      throw new Error("missing context weight");
-    }
+    const metadataPath = path.join(outputDir, "metadata.json");
+    const promptsPath = path.join(outputDir, "prompts.json");
+    const metadata = fs.existsSync(metadataPath)
+      ? JSON.parse(fs.readFileSync(metadataPath, "utf8"))
+      : {};
+    const prompts = fs.existsSync(promptsPath)
+      ? JSON.parse(fs.readFileSync(promptsPath, "utf8"))
+      : {};
+    const events = fs
+      .readFileSync(path.join(outputDir, "events.jsonl"), "utf8")
+      .split(/\r?\n/u)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
 
-    const injected = Array.isArray(report.injectedWorkspaceFiles)
-      ? report.injectedWorkspaceFiles
-      : [];
-    const injectedRows = injected.map((file) => {
-      const injectedChars =
-        typeof file.injectedChars === "number"
-          ? file.injectedChars
-          : typeof file.rawChars === "number"
-            ? file.rawChars
-            : 0;
-      return {
-        name: String(file.name ?? ""),
-        rawChars: Number(file.rawChars ?? 0),
-        injectedChars,
-        tokensApprox: c1EstimateTokensFromChars(injectedChars),
-        truncated: file.truncated === true ? 1 : 0,
-        missing: file.missing === true ? 1 : 0,
-      };
-    });
+    stage = "resolve-call";
+    const compiledIndex = events.findLastIndex((event) => event?.type === "context.compiled");
+    if (compiledIndex < 0) throw new Error("missing context.compiled");
+    const compiled = events[compiledIndex];
+    const compiledData = compiled?.data ?? {};
+    const systemPrompt = typeof compiledData.systemPrompt === "string" ? compiledData.systemPrompt : "";
+    const currentPrompt = typeof compiledData.prompt === "string" ? compiledData.prompt : "";
+    const messages = Array.isArray(compiledData.messages) ? compiledData.messages : [];
+    if (!systemPrompt) throw new Error("missing system prompt");
+
+    const completed =
+      [...events]
+        .slice(compiledIndex + 1)
+        .reverse()
+        .find(
+          (event) =>
+            event?.type === "model.completed" &&
+            (!compiled?.runId || !event?.runId || event.runId === compiled.runId),
+        ) ?? null;
+
+    stage = "measure";
+    const injectedRows = c1ParseInjectedProjectFiles(systemPrompt, workspaceFiles);
     const injectedCharsTotal = injectedRows.reduce((sum, row) => sum + row.injectedChars, 0);
 
-    const skillsEntries = Array.isArray(report.skills?.entries) ? report.skills.entries : [];
-    const skillsChars = Number(
-      report.skills?.promptChars ??
-        skillsEntries.reduce((sum, skill) => sum + Number(skill.blockChars ?? 0), 0),
-    );
-    const projectContextChars = Number(report.systemPrompt?.projectContextChars ?? 0);
-    const nonProjectContextChars = Number(report.systemPrompt?.nonProjectContextChars ?? 0);
-    const projectFrameChars = Math.max(0, projectContextChars - injectedCharsTotal);
-    const systemBaseChars =
-      Math.max(0, nonProjectContextChars - skillsChars) + projectFrameChars;
-    const toolSchemaChars = Number(report.tools?.schemaChars ?? 0);
-    const runtimeContextChars = Number(report.currentTurn?.runtimeContextChars ?? 0);
-    const modelOnlyPromptChars = Number(report.currentTurn?.modelOnlyPromptChars ?? 0);
+    const skillsPrompt = c1ResolveSkillsPrompt(metadata, prompts);
+    const skillsChars = skillsPrompt.length;
+    const skillsCount = Array.from(skillsPrompt.matchAll(/<skill>[\s\S]*?<\/skill>/giu)).length;
 
-    const branchEntries = Array.isArray(branch.entries) ? branch.entries : [];
-    const messages = branchEntries
-      .filter((entry) => entry?.type === "message" && entry?.message)
-      .map((entry) => entry.message);
-    const transcriptChars = messages.reduce(
+    const toolStats = c1ToolSchemaStats(compiledData);
+    const systemPromptTotalChars = systemPrompt.length;
+    const systemBaseChars = Math.max(
+      0,
+      systemPromptTotalChars - skillsChars - injectedCharsTotal,
+    );
+
+    const memoryRecallChars = c1ActiveMemoryChars(currentPrompt);
+    const transcriptHistoryChars = messages.reduce(
       (sum, message) => sum + c1EstimateMessageChars(message),
       0,
     );
-
-    // The target 179,588-token call is independently proven in live logs to
-    // have active-memory recall skipped by policy. Keep the full model-only
-    // bucket visible; memory recall is therefore accounted as zero for that call.
-    const memoryRecallChars = 0;
-    const otherModelOnlyChars = modelOnlyPromptChars;
+    const currentPromptTranscriptChars = Math.max(0, currentPrompt.length - memoryRecallChars);
+    const transcriptChars = transcriptHistoryChars + currentPromptTranscriptChars;
 
     const setupFloorChars =
       systemBaseChars +
-      injectedCharsTotal +
       skillsChars +
-      toolSchemaChars +
-      runtimeContextChars +
-      modelOnlyPromptChars;
+      injectedCharsTotal +
+      toolStats.schemaChars +
+      memoryRecallChars;
     const accountedChars = setupFloorChars + transcriptChars;
 
-    const usage = usageRow?.usage ?? {};
-    const actualInputTokens = c1FindNumeric(usage, [
+    const completionUsage = completed?.data?.usage ?? completed?.data ?? {};
+    const actualInputTokens = c1FindNumeric(completionUsage, [
       "inputTokens",
       "input_tokens",
       "input",
       "promptTokens",
       "prompt_tokens",
     ]);
-    const actualTotalTokens = c1FindNumeric(usage, [
+    const actualOutputTokens = c1FindNumeric(completionUsage, [
+      "outputTokens",
+      "output_tokens",
+      "output",
+      "completionTokens",
+      "completion_tokens",
+    ]);
+    const actualTotalTokens = c1FindNumeric(completionUsage, [
       "totalTokens",
       "total_tokens",
       "total",
     ]);
 
+    const limits = c1ResolveBootstrapLimits();
     const result = {
-      version: 2,
+      version: 3,
       manifest: {
         eventCount: Number(manifest.eventCount ?? 0),
         runtimeEventCount: Number(manifest.runtimeEventCount ?? 0),
         transcriptEventCount: Number(manifest.transcriptEventCount ?? 0),
       },
-      limits: {
-        bootstrapMaxChars: Number(report.bootstrapMaxChars ?? 0),
-        bootstrapTotalMaxChars: Number(report.bootstrapTotalMaxChars ?? 0),
-      },
+      limits,
       source: {
         systemPrompt: {
-          chars: systemBaseChars,
+          totalCharsRendered: systemPromptTotalChars,
+          charsExclusive: systemBaseChars,
           tokensApprox: c1EstimateTokensFromChars(systemBaseChars),
         },
         skillsPrompt: {
           chars: skillsChars,
           tokensApprox: c1EstimateTokensFromChars(skillsChars),
-          count: skillsEntries.length,
+          count: skillsCount,
         },
         toolSchemas: {
-          chars: toolSchemaChars,
-          tokensApprox: c1EstimateTokensFromChars(toolSchemaChars),
-          count: Array.isArray(report.tools?.entries) ? report.tools.entries.length : 0,
+          chars: toolStats.schemaChars,
+          tokensApprox: c1EstimateTokensFromChars(toolStats.schemaChars),
+          count: toolStats.count,
         },
         injectedWorkspaceFiles: injectedRows,
         injectedWorkspaceFilesTotal: {
           chars: injectedCharsTotal,
           tokensApprox: c1EstimateTokensFromChars(injectedCharsTotal),
         },
-        runtimeContext: {
-          chars: runtimeContextChars,
-          tokensApprox: c1EstimateTokensFromChars(runtimeContextChars),
-        },
         memoryRecall: {
           chars: memoryRecallChars,
-          tokensApprox: 0,
-        },
-        otherModelOnlyPrompt: {
-          chars: otherModelOnlyChars,
-          tokensApprox: c1EstimateTokensFromChars(otherModelOnlyChars),
+          tokensApprox: c1EstimateTokensFromChars(memoryRecallChars),
         },
         transcript: {
+          historyChars: transcriptHistoryChars,
+          currentPromptChars: currentPromptTranscriptChars,
           chars: transcriptChars,
           tokensApprox: c1EstimateTokensFromChars(transcriptChars),
           messages: messages.length,
@@ -771,6 +812,7 @@ async function runC1ContextDiagnosticV1() {
         accountedChars,
         accountedTokensApprox: c1EstimateTokensFromChars(accountedChars),
         actualInputTokens: actualInputTokens ?? 0,
+        actualOutputTokens: actualOutputTokens ?? 0,
         actualTotalTokens: actualTotalTokens ?? 0,
       },
       workspaceFiles,
