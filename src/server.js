@@ -1226,7 +1226,7 @@ function b8v2ReadText(file) {
 }
 
 function b8v2ParseProcStatus(pid) {
-  const raw = b8v2ReadText(\`/proc/\${pid}/status\`);
+  const raw = b8v2ReadText(`/proc/${pid}/status`);
   if (!raw) return null;
   const fields = {};
   for (const line of raw.split(/\r?\n/u)) {
@@ -1257,7 +1257,7 @@ function b8v2ParseProcStatus(pid) {
 }
 
 function b8v2ParseSmapsRollup(pid) {
-  const raw = b8v2ReadText(\`/proc/\${pid}/smaps_rollup\`);
+  const raw = b8v2ReadText(`/proc/${pid}/smaps_rollup`);
   if (!raw) return null;
   const wanted = new Set([
     "Rss",
@@ -1277,14 +1277,14 @@ function b8v2ParseSmapsRollup(pid) {
   for (const line of raw.split(/\r?\n/u)) {
     const match = line.match(/^([A-Za-z_]+):\s+(\d+)\s+kB$/u);
     if (!match || !wanted.has(match[1])) continue;
-    result[\`\${match[1]}Bytes\`] = Number(match[2]) * 1024;
+    result[`${match[1]}Bytes`] = Number(match[2]) * 1024;
   }
   return Object.keys(result).length ? result : null;
 }
 
 function b8v2SafeExe(pid) {
   try {
-    return path.basename(fs.readlinkSync(\`/proc/\${pid}/exe\`)).slice(0, 80);
+    return path.basename(fs.readlinkSync(`/proc/${pid}/exe`)).slice(0, 80);
   } catch {
     return null;
   }
