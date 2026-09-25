@@ -206,7 +206,7 @@ async function callOpenRouterResearch({apiKey,model,researcher,brief,searchEngin
   if(packet.brief_id!==brief.brief_id)throw new Error(researcher+" returned wrong brief_id");
   if(packet.researcher!==researcher)throw new Error(researcher+" returned wrong researcher role");
 
-  const searchRequests=Number(data?.usage?.server_tool_use?.web_search_requests ?? 0);
+  const searchRequests=Number(data?.usage?.server_tool_use_details?.web_search_requests ?? data?.usage?.server_tool_use?.web_search_requests ?? 0);
   const annotationCount=Array.isArray(message?.annotations) ? message.annotations.length : 0;
   const sourceCount=Array.isArray(packet?.sources) ? packet.sources.length : 0;
   if(searchRequests<1 && annotationCount<1){
@@ -271,15 +271,17 @@ export async function runJarvisResearchCommissioningV1(){
 
   const verifierModel=process.env.JARVIS_RESEARCH_VERIFIER_MODEL?.trim()||"openrouter/openai/gpt-6-sol";
   const scoutModel=process.env.JARVIS_RESEARCH_SCOUT_MODEL?.trim()||"openrouter/deepseek/deepseek-v4-flash-0731";
+  const verifierSearchEngine=process.env.JARVIS_RESEARCH_VERIFIER_SEARCH_ENGINE?.trim()||"native";
+  const scoutSearchEngine=process.env.JARVIS_RESEARCH_SCOUT_SEARCH_ENGINE?.trim()||"perplexity";
   const startedAt=new Date().toISOString();
 
   let results=[],error=null;
   const settled=await Promise.allSettled([
     callOpenRouterResearch({
-      apiKey:auth.key,model:verifierModel,researcher:"verifier",brief,searchEngine:"native"
+      apiKey:auth.key,model:verifierModel,researcher:"verifier",brief,searchEngine:verifierSearchEngine
     }),
     callOpenRouterResearch({
-      apiKey:auth.key,model:scoutModel,researcher:"scout",brief,searchEngine:"perplexity"
+      apiKey:auth.key,model:scoutModel,researcher:"scout",brief,searchEngine:scoutSearchEngine
     })
   ]);
   const failures=[];
@@ -298,6 +300,8 @@ export async function runJarvisResearchCommissioningV1(){
       search_engine:x.search_engine,
       search_requests:x.search_requests,
       annotation_count:x.annotation_count,
+      tool_calls_requested:Number(x.usage?.server_tool_use_details?.tool_calls_requested ?? 0),
+      tool_calls_executed:Number(x.usage?.server_tool_use_details?.tool_calls_executed ?? 0),
       usage:x.usage
     });
   }
