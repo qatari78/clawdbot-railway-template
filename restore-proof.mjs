@@ -127,10 +127,13 @@ async function run() {
 }
 
 run()
-  .then((result) => {
+  .then(async (result) => {
     console.log("RESTORE_PROOF_OK " + JSON.stringify(result));
+    // Give Railway's runtime log collector time to persist the proof line.
+    await new Promise((resolve) => setTimeout(resolve, 10000));
   })
-  .catch((err) => {
+  .catch(async (err) => {
     console.error("RESTORE_PROOF_FAILED " + String(err?.message || err));
+    await new Promise((resolve) => setTimeout(resolve, 10000));
     process.exit(1);
   });
