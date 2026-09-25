@@ -1216,6 +1216,240 @@ async function runB8MemoryDiagnosticV1() {
   }
 }
 
+
+function b8v2ReadText(file) {
+  try {
+    return fs.readFileSync(file, "utf8");
+  } catch {
+    return "";
+  }
+}
+
+function b8v2ParseProcStatus(pid) {
+  const raw = b8v2ReadText(\`/proc/\${pid}/status\`);
+  if (!raw) return null;
+  const fields = {};
+  for (const line of raw.split(/\r?\n/u)) {
+    const idx = line.indexOf(":");
+    if (idx <= 0) continue;
+    fields[line.slice(0, idx)] = line.slice(idx + 1).trim();
+  }
+  const kb = (name) => {
+    const match = String(fields[name] || "").match(/^(\d+)\s+kB$/u);
+    return match ? Number(match[1]) * 1024 : null;
+  };
+  const integer = (name) => {
+    const value = Number.parseInt(String(fields[name] || ""), 10);
+    return Number.isFinite(value) ? value : null;
+  };
+  return {
+    pid,
+    ppid: integer("PPid"),
+    name: String(fields.Name || "").slice(0, 80) || null,
+    threads: integer("Threads"),
+    vmRssBytes: kb("VmRSS"),
+    rssAnonBytes: kb("RssAnon"),
+    rssFileBytes: kb("RssFile"),
+    rssShmemBytes: kb("RssShmem"),
+    vmSizeBytes: kb("VmSize"),
+    vmSwapBytes: kb("VmSwap"),
+  };
+}
+
+function b8v2ParseSmapsRollup(pid) {
+  const raw = b8v2ReadText(\`/proc/\${pid}/smaps_rollup\`);
+  if (!raw) return null;
+  const wanted = new Set([
+    "Rss",
+    "Pss",
+    "Pss_Anon",
+    "Pss_File",
+    "Pss_Shmem",
+    "Shared_Clean",
+    "Shared_Dirty",
+    "Private_Clean",
+    "Private_Dirty",
+    "Anonymous",
+    "AnonHugePages",
+    "Swap",
+  ]);
+  const result = {};
+  for (const line of raw.split(/\r?\n/u)) {
+    const match = line.match(/^([A-Za-z_]+):\s+(\d+)\s+kB$/u);
+    if (!match || !wanted.has(match[1])) continue;
+    result[\`\${match[1]}Bytes\`] = Number(match[2]) * 1024;
+  }
+  return Object.keys(result).length ? result : null;
+}
+
+function b8v2SafeExe(pid) {
+  try {
+    return path.basename(fs.readlinkSync(\`/proc/\${pid}/exe\`)).slice(0, 80);
+  } catch {
+    return null;
+  }
+}
+
+function b8v2ListProcesses() {
+  let entries = [];
+  try {
+    entries = fs.readdirSync("/proc", { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const rows = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !/^\d+$/u.test(entry.name)) continue;
+    const row = b8v2ParseProcStatus(Number(entry.name));
+    if (row) rows.push(row);
+  }
+  return rows;
+}
+
+function b8v2Descendants(rootPid, rows) {
+  const children = new Map();
+  for (const row of rows) {
+    if (!Number.isFinite(row.ppid)) continue;
+    const list = children.get(row.ppid) || [];
+    list.push(row.pid);
+    children.set(row.ppid, list);
+  }
+  const found = new Set([rootPid]);
+  const queue = [rootPid];
+  while (queue.length) {
+    const parent = queue.shift();
+    for (const child of children.get(parent) || []) {
+      if (found.has(child)) continue;
+      found.add(child);
+      queue.push(child);
+    }
+  }
+  return found;
+}
+
+function b8v2CaptureProcessTree() {
+  const gatewayPid = gatewayProc?.pid;
+  const rows = b8v2ListProcesses();
+  const keep = new Set();
+  for (const root of [process.pid, gatewayPid].filter(Number.isFinite)) {
+    for (const pid of b8v2Descendants(root, rows)) keep.add(pid);
+  }
+  return {
+    at: new Date().toISOString(),
+    wrapperPid: process.pid,
+    gatewayPid: Number.isFinite(gatewayPid) ? gatewayPid : null,
+    processes: rows
+      .filter((row) => keep.has(row.pid))
+      .map((row) => ({
+        ...row,
+        exe: b8v2SafeExe(row.pid),
+        smaps: b8v2ParseSmapsRollup(row.pid),
+      }))
+      .sort((a, b) => a.pid - b.pid),
+  };
+}
+
+function b8v2FindKey(value, key, depth = 0) {
+  if (depth > 12 || value == null) return null;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = b8v2FindKey(item, key, depth + 1);
+      if (found !== null) return found;
+    }
+    return null;
+  }
+  if (typeof value !== "object") return null;
+  if (Object.prototype.hasOwnProperty.call(value, key)) return value[key];
+  for (const child of Object.values(value)) {
+    const found = b8v2FindKey(child, key, depth + 1);
+    if (found !== null) return found;
+  }
+  return null;
+}
+
+function b8v2CompactWorkerPools(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const result = {};
+  for (const [name, pool] of Object.entries(value)) {
+    if (!pool || typeof pool !== "object" || Array.isArray(pool)) continue;
+    result[name] = Object.fromEntries(
+      ["maxWorkers", "workers", "workersCreated", "activeTasks", "pendingTasks"]
+        .map((key) => [key, Number.isFinite(pool[key]) ? Number(pool[key]) : null]),
+    );
+  }
+  return Object.keys(result).length ? result : null;
+}
+
+async function b8v2GatewayProbe() {
+  const env = {
+    ...process.env,
+    OPENCLAW_STATE_DIR: STATE_DIR,
+    OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
+  };
+  const status = await runCmd(
+    OPENCLAW_NODE,
+    clawArgs(["gateway", "status", "--deep", "--json", "--timeout", "10000"]),
+    { env, timeoutMs: 25_000 },
+  );
+  const stability = await runCmd(
+    OPENCLAW_NODE,
+    clawArgs([
+      "gateway", "call", "diagnostics.stability",
+      "--params", JSON.stringify({ limit: 200 }),
+      "--timeout", "10000", "--json",
+    ]),
+    { env, timeoutMs: 20_000 },
+  );
+  const statusJson = status.code === 0 ? b8ParseJsonLoose(status.output) : null;
+  const stabilityJson = stability.code === 0 ? b8ParseJsonLoose(stability.output) : null;
+  const memoryRows = b8CollectMemoryRows(stabilityJson);
+  return {
+    statusCode: status.code,
+    stabilityCode: stability.code,
+    workerPools: b8v2CompactWorkerPools(b8v2FindKey(statusJson, "workerPools")),
+    latestMemory: memoryRows.length ? memoryRows[memoryRows.length - 1] : null,
+  };
+}
+
+async function runB8MemoryDiagnosticV2() {
+  const markerPath = path.join(STATE_DIR, "b8-memory-diagnostic-v2.json");
+  if (fs.existsSync(markerPath)) {
+    console.log("[b8-memory-v2] skipped marker=present");
+    return;
+  }
+
+  try {
+    const first = b8v2CaptureProcessTree();
+    const firstProbe = await b8v2GatewayProbe();
+    await sleep(30_000);
+    const second = b8v2CaptureProcessTree();
+    await sleep(30_000);
+    const third = b8v2CaptureProcessTree();
+    const finalProbe = await b8v2GatewayProbe();
+
+    const result = {
+      version: 2,
+      modelTurnSubmitted: 0,
+      captureSeconds: [0, 30, 60],
+      first,
+      second,
+      third,
+      firstProbe,
+      finalProbe,
+    };
+    console.log("[b8-memory-v2] " + JSON.stringify(result));
+    fs.writeFileSync(markerPath, JSON.stringify(result, null, 2) + "\n", {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+  } catch (err) {
+    console.error(
+      "[b8-memory-v2] failed=" +
+        JSON.stringify({ errorClass: err?.constructor?.name || "Error" }),
+    );
+  }
+}
+
 async function runC1FreshFloorV1() {
   const sessionKey = "agent:main:main";
   const markerPath = path.join(STATE_DIR, "c1-fresh-floor-v1.json");
@@ -3186,6 +3420,7 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
       const c1FreshReady = await runC1FreshFloorV1();
       if (c1FreshReady) await runC1ContextDiagnosticV1("current");
       await runB8MemoryDiagnosticV1();
+      await runB8MemoryDiagnosticV2();
       launchOpenRouterKeyAuditV1();
       launchJarvisSecurityAuditV1();
       launchJarvisAgentSmokeV1();
@@ -3204,6 +3439,7 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
           const c1FreshReady = await runC1FreshFloorV1();
           if (c1FreshReady) await runC1ContextDiagnosticV1("current");
           await runB8MemoryDiagnosticV1();
+      await runB8MemoryDiagnosticV2();
           launchJarvisSecurityAuditV1();
           launchJarvisAgentSmokeV1();
           launchJarvisAdviserMemoryCommissioningV1();
