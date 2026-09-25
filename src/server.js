@@ -390,6 +390,324 @@ async function runJarvisMainSessionRecoveryV1() {
   }
 }
 
+
+function c1EstimateTokensFromChars(chars) {
+  return Math.ceil(Math.max(0, Number(chars) || 0) / 4);
+}
+
+function c1EstimateUnknownChars(value) {
+  if (typeof value === "string") return value.length;
+  if (value === undefined) return 0;
+  try {
+    const serialized = JSON.stringify(value);
+    return typeof serialized === "string" ? serialized.length : 0;
+  } catch {
+    return 256;
+  }
+}
+
+function c1EstimateMessageChars(message) {
+  if (!message || typeof message !== "object" || message.excludeFromContext === true) return 0;
+  const role = message.role;
+  const content = message.content;
+
+  const estimateBlocks = (blocks, toolResult = false) => {
+    let chars = 0;
+    for (const block of Array.isArray(blocks) ? blocks : []) {
+      if (block && typeof block === "object" && block.type === "text" && typeof block.text === "string") {
+        chars += toolResult ? block.text.length * 2 : block.text.length;
+      } else if (block && typeof block === "object" && block.type === "image") {
+        chars += toolResult ? 16000 : 8000;
+      } else {
+        chars += c1EstimateUnknownChars(block) * (toolResult ? 2 : 1);
+      }
+    }
+    return chars;
+  };
+
+  if (role === "user" || role === "custom") {
+    if (typeof content === "string") return content.length;
+    return estimateBlocks(content, false);
+  }
+
+  if (role === "assistant") {
+    let chars = 0;
+    for (const block of Array.isArray(content) ? content : []) {
+      if (!block || typeof block !== "object") continue;
+      if (block.type === "text" && typeof block.text === "string") {
+        chars += block.text.length;
+      } else if (block.type === "thinking" && typeof block.thinking === "string") {
+        chars += block.thinking.length;
+      } else if (block.type === "toolCall") {
+        chars += c1EstimateUnknownChars(block.arguments ?? {});
+      } else {
+        chars += c1EstimateUnknownChars(block);
+      }
+    }
+    return chars;
+  }
+
+  if (role === "toolResult" || role === "tool" || message.type === "toolResult") {
+    const blocks =
+      typeof content === "string" ? [{ type: "text", text: content }] : Array.isArray(content) ? content : [];
+    return estimateBlocks(blocks, true);
+  }
+
+  if (role === "branchSummary" || role === "compactionSummary") {
+    return typeof message.summary === "string" ? message.summary.length : 0;
+  }
+
+  return 256;
+}
+
+function c1FindNumeric(value, preferredKeys) {
+  if (!value || typeof value !== "object") return null;
+  for (const key of preferredKeys) {
+    const candidate = value[key];
+    if (typeof candidate === "number" && Number.isFinite(candidate)) return candidate;
+  }
+  for (const child of Object.values(value)) {
+    if (child && typeof child === "object") {
+      const found = c1FindNumeric(child, preferredKeys);
+      if (found !== null) return found;
+    }
+  }
+  return null;
+}
+
+function c1ActiveMemoryChars(prompt) {
+  if (typeof prompt !== "string") return 0;
+  const open = "<active_memory_plugin>";
+  const close = "</active_memory_plugin>";
+  const start = prompt.lastIndexOf(open);
+  if (start < 0) return 0;
+  const end = prompt.indexOf(close, start + open.length);
+  if (end < 0) return 0;
+  const blockEnd = end + close.length;
+  const header = "Context:\n";
+  const headerStart = Math.max(0, start - header.length);
+  return prompt.slice(headerStart, start) === header ? blockEnd - headerStart : blockEnd - start;
+}
+
+function c1WorkspaceFileSizes(root) {
+  const files = [];
+  const visit = (dir) => {
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      const rel = path.relative(root, full) || ".";
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) {
+        visit(full);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      try {
+        files.push({ path: rel, bytes: fs.statSync(full).size });
+      } catch {}
+    }
+  };
+  visit(root);
+  return files.sort((a, b) => a.path.localeCompare(b.path));
+}
+
+async function runC1ContextDiagnosticV1() {
+  const sessionKey = "agent:main:main";
+  const outputName = "c1-context-diagnostic-v1";
+  const outputDir = path.join(
+    WORKSPACE_DIR,
+    ".openclaw",
+    "trajectory-exports",
+    outputName,
+  );
+  const workspaceFiles = c1WorkspaceFileSizes(WORKSPACE_DIR);
+
+  try {
+    fs.rmSync(outputDir, { recursive: true, force: true });
+    await runCmd(
+      OPENCLAW_NODE,
+      clawArgs([
+        "sessions",
+        "export-trajectory",
+        "--session-key",
+        sessionKey,
+        "--agent",
+        "main",
+        "--workspace",
+        WORKSPACE_DIR,
+        "--output",
+        outputName,
+        "--json",
+      ]),
+      {
+        env: {
+          ...process.env,
+          OPENCLAW_STATE_DIR: STATE_DIR,
+          OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
+        },
+        timeoutMs: 120_000,
+      },
+    );
+
+    const manifest = JSON.parse(fs.readFileSync(path.join(outputDir, "manifest.json"), "utf8"));
+    const metadata = JSON.parse(fs.readFileSync(path.join(outputDir, "metadata.json"), "utf8"));
+    const artifactsPath = path.join(outputDir, "artifacts.json");
+    const artifacts = fs.existsSync(artifactsPath)
+      ? JSON.parse(fs.readFileSync(artifactsPath, "utf8"))
+      : {};
+
+    const events = fs
+      .readFileSync(path.join(outputDir, "events.jsonl"), "utf8")
+      .split(/\r?\n/u)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    const latestCompiled = [...events].reverse().find((event) => event?.type === "context.compiled");
+    const report = metadata?.prompting?.systemPromptReport;
+    if (!report || !latestCompiled?.data) {
+      throw new Error("missing trajectory context report");
+    }
+
+    const injected = Array.isArray(report.injectedWorkspaceFiles)
+      ? report.injectedWorkspaceFiles
+      : [];
+    const injectedRows = injected.map((file) => {
+      const injectedChars =
+        typeof file.injectedChars === "number"
+          ? file.injectedChars
+          : typeof file.rawChars === "number"
+            ? file.rawChars
+            : 0;
+      return {
+        name: String(file.name ?? ""),
+        rawChars: Number(file.rawChars ?? 0),
+        injectedChars,
+        tokensApprox: c1EstimateTokensFromChars(injectedChars),
+        truncated: file.truncated === true ? 1 : 0,
+        missing: file.missing === true ? 1 : 0,
+      };
+    });
+    const injectedCharsTotal = injectedRows.reduce((sum, row) => sum + row.injectedChars, 0);
+    const skillsEntries = Array.isArray(report.skills?.entries) ? report.skills.entries : [];
+    const skillsChars = skillsEntries.reduce((sum, skill) => sum + Number(skill.blockChars ?? 0), 0);
+    const projectContextChars = Number(report.systemPrompt?.projectContextChars ?? 0);
+    const nonProjectContextChars = Number(report.systemPrompt?.nonProjectContextChars ?? 0);
+    const projectFrameChars = Math.max(0, projectContextChars - injectedCharsTotal);
+    const systemBaseChars = Math.max(0, nonProjectContextChars - skillsChars) + projectFrameChars;
+    const toolSchemaChars = Number(report.tools?.schemaChars ?? 0);
+    const runtimeContextChars = Number(report.currentTurn?.runtimeContextChars ?? 0);
+    const modelOnlyPromptChars = Number(report.currentTurn?.modelOnlyPromptChars ?? 0);
+    const currentPromptChars = Number(report.currentTurn?.promptChars ?? 0);
+
+    const messages = Array.isArray(latestCompiled.data.messages) ? latestCompiled.data.messages : [];
+    const transcriptHistoryChars = messages.reduce(
+      (sum, message) => sum + c1EstimateMessageChars(message),
+      0,
+    );
+    const transcriptChars = transcriptHistoryChars + currentPromptChars;
+
+    const memoryRecallChars = Math.min(
+      modelOnlyPromptChars,
+      c1ActiveMemoryChars(latestCompiled.data.prompt),
+    );
+    const otherModelOnlyChars = Math.max(0, modelOnlyPromptChars - memoryRecallChars);
+
+    const setupFloorChars =
+      systemBaseChars +
+      injectedCharsTotal +
+      skillsChars +
+      toolSchemaChars +
+      runtimeContextChars +
+      modelOnlyPromptChars;
+    const accountedChars = setupFloorChars + transcriptChars;
+
+    const actualInputTokens = c1FindNumeric(artifacts?.usage, [
+      "inputTokens",
+      "input_tokens",
+      "input",
+      "promptTokens",
+      "prompt_tokens",
+    ]);
+    const actualTotalTokens = c1FindNumeric(artifacts?.usage, [
+      "totalTokens",
+      "total_tokens",
+      "total",
+    ]);
+
+    const result = {
+      version: 1,
+      manifest: {
+        eventCount: Number(manifest.eventCount ?? 0),
+        runtimeEventCount: Number(manifest.runtimeEventCount ?? 0),
+        transcriptEventCount: Number(manifest.transcriptEventCount ?? 0),
+      },
+      limits: {
+        bootstrapMaxChars: Number(report.bootstrapMaxChars ?? 0),
+        bootstrapTotalMaxChars: Number(report.bootstrapTotalMaxChars ?? 0),
+      },
+      source: {
+        systemPrompt: {
+          chars: systemBaseChars,
+          tokensApprox: c1EstimateTokensFromChars(systemBaseChars),
+        },
+        skillsPrompt: {
+          chars: skillsChars,
+          tokensApprox: c1EstimateTokensFromChars(skillsChars),
+          count: skillsEntries.length,
+        },
+        toolSchemas: {
+          chars: toolSchemaChars,
+          tokensApprox: c1EstimateTokensFromChars(toolSchemaChars),
+          count: Array.isArray(report.tools?.entries) ? report.tools.entries.length : 0,
+        },
+        injectedWorkspaceFiles: injectedRows,
+        injectedWorkspaceFilesTotal: {
+          chars: injectedCharsTotal,
+          tokensApprox: c1EstimateTokensFromChars(injectedCharsTotal),
+        },
+        runtimeContext: {
+          chars: runtimeContextChars,
+          tokensApprox: c1EstimateTokensFromChars(runtimeContextChars),
+        },
+        memoryRecall: {
+          chars: memoryRecallChars,
+          tokensApprox: c1EstimateTokensFromChars(memoryRecallChars),
+        },
+        otherModelOnlyPrompt: {
+          chars: otherModelOnlyChars,
+          tokensApprox: c1EstimateTokensFromChars(otherModelOnlyChars),
+        },
+        transcript: {
+          historyChars: transcriptHistoryChars,
+          currentPromptChars,
+          chars: transcriptChars,
+          tokensApprox: c1EstimateTokensFromChars(transcriptChars),
+          messages: messages.length,
+        },
+      },
+      totals: {
+        setupFloorChars,
+        setupFloorTokensApprox: c1EstimateTokensFromChars(setupFloorChars),
+        accountedChars,
+        accountedTokensApprox: c1EstimateTokensFromChars(accountedChars),
+        actualInputTokens: actualInputTokens ?? 0,
+        actualTotalTokens: actualTotalTokens ?? 0,
+      },
+      workspaceFiles,
+    };
+
+    console.log("[c1-context-v1] " + JSON.stringify(result));
+  } catch {
+    console.error("[c1-context-v1] failed=1");
+  } finally {
+    try { fs.rmSync(outputDir, { recursive: true, force: true }); } catch {}
+  }
+}
+
 function requireSetupAuth(req, res, next) {
   if (!SETUP_PASSWORD) {
     return res
@@ -2244,6 +2562,7 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
       await ensureGatewayRunning();
       console.log("[wrapper] gateway ready");
       await runJarvisMainSessionRecoveryV1();
+      await runC1ContextDiagnosticV1();
       launchOpenRouterKeyAuditV1();
       launchJarvisSecurityAuditV1();
       launchJarvisAgentSmokeV1();
