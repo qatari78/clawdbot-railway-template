@@ -1382,24 +1382,17 @@ app.get("/setup/export", requireExportAuth, async (_req, res) => {
     `attachment; filename="openclaw-backup-${new Date().toISOString().replace(/[:.]/g, "-")}.tar.gz"`,
   );
 
-  // Prefer exporting from a common /data root so archives are easy to inspect and restore.
-  // This preserves dotfiles like /data/.openclaw/openclaw.json.
-  const stateAbs = path.resolve(STATE_DIR);
-  const workspaceAbs = path.resolve(WORKSPACE_DIR);
-
+  // Export the entire Railway persistent volume. A recovery archive must cover
+  // every /data area, not only OpenClaw state/workspace.
   const dataRoot = "/data";
-  const underData = (p) => p === dataRoot || p.startsWith(dataRoot + path.sep);
+  if (!fs.existsSync(dataRoot)) {
+    return res.status(500).type("text/plain").send("/data volume is not mounted\n");
+  }
 
-  let cwd = "/";
-  let paths = [stateAbs, workspaceAbs].map((p) => p.replace(/^\//, ""));
-
-  if (underData(stateAbs) && underData(workspaceAbs)) {
-    cwd = dataRoot;
-    // We export relative to /data so the archive contains: .openclaw/... and workspace/...
-    paths = [
-      path.relative(dataRoot, stateAbs) || ".",
-      path.relative(dataRoot, workspaceAbs) || ".",
-    ];
+  const cwd = dataRoot;
+  const paths = fs.readdirSync(dataRoot).sort();
+  if (paths.length === 0) {
+    return res.status(500).type("text/plain").send("/data volume is empty\n");
   }
 
   const stream = tar.c(
