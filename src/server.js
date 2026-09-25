@@ -2096,7 +2096,7 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
       console.log("[wrapper] gateway ready");
       launchOpenRouterKeyAuditV1();
       launchJarvisSecurityAuditV1();
-      launchJarvisAgentSmokeV1();
+      launchJarvisAgentSmokeV1();\launchJarvisResearchCommissioningV1();\nn
       launchJarvisAdviserMemoryCommissioningV1();
     } catch (err) {
       console.error(`[wrapper] gateway failed to start at boot: ${String(err)}`);
@@ -2110,7 +2110,7 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
           console.log("[wrapper] gateway ready after retry");
           clearInterval(gatewayRetryTimer);
           launchJarvisSecurityAuditV1();
-          launchJarvisAgentSmokeV1();
+          launchJarvisAgentSmokeV1();\launchJarvisResearchCommissioningV1();\nn
       launchJarvisAdviserMemoryCommissioningV1();
         } catch (retryErr) {
           console.warn(`[wrapper] gateway retry not ready yet: ${String(retryErr)}`);
