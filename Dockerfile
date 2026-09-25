@@ -24,9 +24,9 @@ WORKDIR /openclaw
 # Using a released tag avoids build breakage when `main` temporarily references unpublished packages.
 ARG OPENCLAW_GIT_REF=v2026.3.8
 RUN git clone --depth 1 --branch "${OPENCLAW_GIT_REF}" https://github.com/openclaw/openclaw.git .
-RUN printf '[openclaw-build-ref] requested=%s\\n' "${OPENCLAW_GIT_REF}" \
-  && printf '[openclaw-build-ref] head=' && git rev-parse HEAD \
-  && printf '[openclaw-build-ref] describe=' && git describe --tags --always --dirty
+RUN echo "[openclaw-build-ref] requested=${OPENCLAW_GIT_REF}" \
+  && echo "[openclaw-build-ref] head=$(git rev-parse HEAD)" \
+  && echo "[openclaw-build-ref] describe=$(git describe --tags --always --dirty)"
 
 # Patch: relax version requirements for packages that may reference unpublished versions.
 # Apply to all extension package.json files to handle workspace protocol (workspace:*).
@@ -63,66 +63,10 @@ fs.writeFileSync(p, s);
 NODE
 
 # Diagnostic only: expose the first WhatsApp durable-delivery failure.
-# Logs contain queue state and error metadata only; they do not log message text or recipient.
-RUN node <<'NODE'
-const fs = require("fs");
+# Kept in a standalone script so Dockerfile parsing cannot affect the diagnostic build.
+COPY scripts/openclaw-whatsapp-diagnostic.cjs /tmp/openclaw-whatsapp-diagnostic.cjs
+RUN node /tmp/openclaw-whatsapp-diagnostic.cjs
 
-const execPath = "src/infra/outbound/deliver-queue-execute.ts";
-const queuePath = "src/infra/outbound/deliver-queue.ts";
-for (const p of [execPath, queuePath]) {
-  if (!fs.existsSync(p)) throw new Error(`WhatsApp delivery diagnostic target missing: ${p}`);
-}
-
-let execSource = fs.readFileSync(execPath, "utf8");
-if (!execSource.includes("[whatsapp-live-delivery-diagnostic]")) {
-  const needle = `  } catch (caughtError) {
-    let err = caughtError;`;
-  const replacement = `  } catch (caughtError) {
-    if (params.channel === "whatsapp") {
-      const diagnosticError =
-        caughtError instanceof Error ? caughtError : new Error(formatErrorMessage(caughtError));
-      const diagnosticCode =
-        typeof caughtError === "object" &&
-        caughtError !== null &&
-        "code" in caughtError
-          ? String((caughtError as { code?: unknown }).code ?? "")
-          : "";
-      log.warn(
-        \\`[whatsapp-live-delivery-diagnostic] queueId=\\${queueId ?? "none"} producerClaim=\\${producerClaimId ? "present" : "missing"} custody=\\${queueOwner?.custody ?? "none"} platformSendStarted=\\${platformSendStarted} preSend=\\${queuedPreSendState ?? "none"} postSend=\\${queuedPostSendState ?? "none"} results=\\${deliveredResults.length} aborted=\\${Boolean(params.abortSignal?.aborted)} errorName=\\${diagnosticError.name} errorCode=\\${diagnosticCode || "none"} error=\\${formatErrorMessage(caughtError)}\\`,
-      );
-    }
-    let err = caughtError;`;
-  if (!execSource.includes(needle)) {
-    throw new Error("deliver-queue-execute diagnostic insertion point not found");
-  }
-  execSource = execSource.replace(needle, replacement);
-  fs.writeFileSync(execPath, execSource);
-}
-
-let queueSource = fs.readFileSync(queuePath, "utf8");
-if (!queueSource.includes("[whatsapp-queue-handoff-diagnostic]")) {
-  const needle = `  } catch (error) {
-    throw queueOwner ? queueOwner.project(error) : error;
-  }
-}`;
-  const replacement = `  } catch (error) {
-    if (channel === "whatsapp") {
-      log.warn(
-        \\`[whatsapp-queue-handoff-diagnostic] queueId=\\${queueId ?? "none"} created=\\${queued?.created === true} producerClaim=\\${queued?.producerClaimId ? "present" : "missing"} custody=\\${queueOwner?.custody ?? "none"} reusePending=\\${Boolean(params.reusePendingDeliveryIntent)} stableClaim=\\${stableIntentClaimHeld} aborted=\\${Boolean(params.abortSignal?.aborted)} error=\\${formatErrorMessage(error)}\\`,
-      );
-    }
-    throw queueOwner ? queueOwner.project(error) : error;
-  }
-}`;
-  const idx = queueSource.lastIndexOf(needle);
-  if (idx < 0) {
-    throw new Error("deliver-queue diagnostic insertion point not found");
-  }
-  queueSource =
-    queueSource.slice(0, idx) + replacement + queueSource.slice(idx + needle.length);
-  fs.writeFileSync(queuePath, queueSource);
-}
-NODE
 
 RUN pnpm install --no-frozen-lockfile
 RUN pnpm build
