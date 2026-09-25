@@ -760,6 +760,53 @@ async function runC1ContextDiagnosticV1() {
       return null;
     };
 
+    const c1HistoryRowShape = (message) => {
+      if (!message || typeof message !== "object" || Array.isArray(message)) {
+        return { kind: Array.isArray(message) ? "array" : typeof message };
+      }
+      const meta =
+        message.__openclaw &&
+        typeof message.__openclaw === "object" &&
+        !Array.isArray(message.__openclaw)
+          ? message.__openclaw
+          : {};
+      const content = message.content;
+      const textLengths = [];
+      if (typeof message.text === "string") textLengths.push(message.text.length);
+      if (typeof content === "string") textLengths.push(content.length);
+      if (Array.isArray(content)) {
+        for (const block of content) {
+          if (!block || typeof block !== "object" || Array.isArray(block)) continue;
+          if (typeof block.text === "string") textLengths.push(block.text.length);
+          if (typeof block.content === "string") textLengths.push(block.content.length);
+        }
+      }
+      return {
+        role: typeof message.role === "string" ? message.role : null,
+        keys: Object.keys(message).sort(),
+        metaKeys: Object.keys(meta).sort(),
+        id: typeof meta.id === "string" ? meta.id : null,
+        idempotencyKey:
+          typeof meta.idempotencyKey === "string" ? meta.idempotencyKey : null,
+        truncated: meta.truncated === true ? 1 : 0,
+        reason: typeof meta.reason === "string" ? meta.reason : null,
+        contentKind: Array.isArray(content) ? "array" : typeof content,
+        contentBlocks: Array.isArray(content) ? content.length : null,
+        textLengths,
+      };
+    };
+    console.log(
+      "[c1-history-shape-v1] " +
+        JSON.stringify({
+          historyPayloadKeys:
+            historyPayload && typeof historyPayload === "object" && !Array.isArray(historyPayload)
+              ? Object.keys(historyPayload).sort()
+              : [],
+          historyMessages: historyMessages.length,
+          rows: historyMessages.slice(-12).map(c1HistoryRowShape),
+        }),
+    );
+
     const assistantMessages = historyMessages
       .slice()
       .reverse()
