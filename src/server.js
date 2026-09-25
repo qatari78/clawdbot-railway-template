@@ -1871,6 +1871,15 @@ function applyJarvisOperationalDefaults() {
       if (cfg.plugins.load && Object.keys(cfg.plugins.load).length === 0) delete cfg.plugins.load;
     }
 
+    // Main Jarvis latency: Grok 4.7 is tool-capable but is not currently
+    // catalog-marked as a preferred Code Mode model, so global "auto" leaves
+    // the full coding/browser/gateway/messaging tool schemas in every provider
+    // request. Force generic Code Mode for this exact model only. This preserves
+    // the authorized tool catalog while deferring full schemas until actually
+    // needed, materially reducing ordinary WhatsApp prompt prefill.
+    cfg.agents.defaults.models["openrouter/x-ai/grok-4.7"] ??= {};
+    cfg.agents.defaults.models["openrouter/x-ai/grok-4.7"].codeMode = true;
+
     // Capability policy: do not impose Jarvis-specific output-token ceilings.
     // Let each provider/model use its native output/reasoning capacity. Financial
     // control lives at OpenRouter/prepaid credit; structural safeguards below
