@@ -24,6 +24,9 @@ WORKDIR /openclaw
 # Using a released tag avoids build breakage when `main` temporarily references unpublished packages.
 ARG OPENCLAW_GIT_REF=v2026.3.8
 RUN git clone --depth 1 --branch "${OPENCLAW_GIT_REF}" https://github.com/openclaw/openclaw.git .
+RUN printf '[openclaw-build-ref] requested=%s\\n' "${OPENCLAW_GIT_REF}" \
+  && printf '[openclaw-build-ref] head=' && git rev-parse HEAD \
+  && printf '[openclaw-build-ref] describe=' && git describe --tags --always --dirty
 
 # Patch: relax version requirements for packages that may reference unpublished versions.
 # Apply to all extension package.json files to handle workspace protocol (workspace:*).
@@ -59,194 +62,69 @@ s = s.replace(old, replacement);
 fs.writeFileSync(p, s);
 NODE
 
-# WhatsApp live-listener runtime fix:
-# Outbound sends can execute inside a plugin-instance scope whose named slot exists
-# but is still null. That empty instance slot must not mask WhatsApp's deliberately
-# process-lifetime channel-context-owner runtime. Make fallback opt-in so generic
-# plugin-instance isolation semantics remain unchanged, and keep writes instance-scoped.
+# Diagnostic only: expose the first WhatsApp durable-delivery failure.
+# Logs contain queue state and error metadata only; they do not log message text or recipient.
 RUN node <<'NODE'
 const fs = require("fs");
 
-const storePath = "src/plugin-sdk/runtime-store.ts";
-const waPath = "extensions/whatsapp/src/runtime.ts";
-const testPath = "src/plugin-sdk/runtime-store.test.ts";
-
-for (const p of [storePath, waPath, testPath]) {
-  if (!fs.existsSync(p)) throw new Error(`WhatsApp runtime patch target missing: ${p}`);
+const execPath = "src/infra/outbound/deliver-queue-execute.ts";
+const queuePath = "src/infra/outbound/deliver-queue.ts";
+for (const p of [execPath, queuePath]) {
+  if (!fs.existsSync(p)) throw new Error(\`WhatsApp delivery diagnostic target missing: \${p}\`);
 }
 
-let store = fs.readFileSync(storePath, "utf8");
-
-if (!store.includes("fallbackToDefaultWhenInstanceEmpty")) {
-  const keyTypeNeedle = `type PluginRuntimeStoreKeyOptions = {
-  /** Explicit global registry key for shared runtime slots. */
-  key: string;
-  /** Error thrown by getRuntime before setRuntime initializes this slot. */
-  errorMessage: string;
-};`;
-  const keyTypeReplacement = `type PluginRuntimeStoreKeyOptions = {
-  /** Explicit global registry key for shared runtime slots. */
-  key: string;
-  /** Error thrown by getRuntime before setRuntime initializes this slot. */
-  errorMessage: string;
-  /** Read the named process-lifetime slot when the active instance slot is empty. */
-  fallbackToDefaultWhenInstanceEmpty?: boolean;
-};`;
-  if (!store.includes(keyTypeNeedle)) throw new Error("runtime-store key options patch target not found");
-  store = store.replace(keyTypeNeedle, keyTypeReplacement);
-
-  const pluginTypeNeedle = `type PluginRuntimeStorePluginOptions = {
-  /** Plugin id used to derive a stable cross-module runtime slot key. */
-  pluginId: string;
-  /** Error thrown by getRuntime before setRuntime initializes this slot. */
-  errorMessage: string;
-};`;
-  const pluginTypeReplacement = `type PluginRuntimeStorePluginOptions = {
-  /** Plugin id used to derive a stable cross-module runtime slot key. */
-  pluginId: string;
-  /** Error thrown by getRuntime before setRuntime initializes this slot. */
-  errorMessage: string;
-  /** Read the named process-lifetime slot when the active instance slot is empty. */
-  fallbackToDefaultWhenInstanceEmpty?: boolean;
-};`;
-  if (!store.includes(pluginTypeNeedle)) throw new Error("runtime-store plugin options patch target not found");
-  store = store.replace(pluginTypeNeedle, pluginTypeReplacement);
-
-  const resolveNeedle = `    return {
-      key: pluginRuntimeStoreKeyForPluginId(options.pluginId),
-      errorMessage: options.errorMessage,
-    };`;
-  const resolveReplacement = `    return {
-      key: pluginRuntimeStoreKeyForPluginId(options.pluginId),
-      errorMessage: options.errorMessage,
-      fallbackToDefaultWhenInstanceEmpty: options.fallbackToDefaultWhenInstanceEmpty,
-    };`;
-  if (!store.includes(resolveNeedle)) throw new Error("runtime-store resolve options patch target not found");
-  store = store.replace(resolveNeedle, resolveReplacement);
-
-  const runtimeNeedle = `  const resolveSlot = () => getPluginInstanceRuntimeSlot(instanceKey) ?? defaultSlot;
-
-  return {
-    setRuntime(next: T) {
-      resolveSlot().runtime = next;
-    },
-    clearRuntime() {
-      resolveSlot().runtime = null;
-    },
-    tryGetRuntime() {
-      return (resolveSlot().runtime as T | null) ?? null;
-    },
-    getRuntime() {
-      const slot = resolveSlot();
-      if (slot.runtime == null) {
-        throw new Error(resolved.errorMessage);
-      }
-      return slot.runtime as T;
-    },
-  };`;
-  const runtimeReplacement = `  const resolveSlot = () => getPluginInstanceRuntimeSlot(instanceKey) ?? defaultSlot;
-  const readRuntime = (): T | null => {
-    const instanceSlot = getPluginInstanceRuntimeSlot(instanceKey);
-    if (!instanceSlot) {
-      return (defaultSlot.runtime as T | null) ?? null;
+let execSource = fs.readFileSync(execPath, "utf8");
+if (!execSource.includes("[whatsapp-live-delivery-diagnostic]")) {
+  const needle = \`  } catch (caughtError) {
+    let err = caughtError;\`;
+  const replacement = \`  } catch (caughtError) {
+    if (params.channel === "whatsapp") {
+      const diagnosticError =
+        caughtError instanceof Error ? caughtError : new Error(formatErrorMessage(caughtError));
+      const diagnosticCode =
+        typeof caughtError === "object" &&
+        caughtError !== null &&
+        "code" in caughtError
+          ? String((caughtError as { code?: unknown }).code ?? "")
+          : "";
+      log.warn(
+        \\\`[whatsapp-live-delivery-diagnostic] queueId=\\\${queueId ?? "none"} producerClaim=\\\${producerClaimId ? "present" : "missing"} custody=\\\${queueOwner?.custody ?? "none"} platformSendStarted=\\\${platformSendStarted} preSend=\\\${queuedPreSendState ?? "none"} postSend=\\\${queuedPostSendState ?? "none"} results=\\\${deliveredResults.length} aborted=\\\${Boolean(params.abortSignal?.aborted)} errorName=\\\${diagnosticError.name} errorCode=\\\${diagnosticCode || "none"} error=\\\${formatErrorMessage(caughtError)}\\\`,
+      );
     }
-    if (instanceSlot.runtime != null || !resolved.fallbackToDefaultWhenInstanceEmpty) {
-      return (instanceSlot.runtime as T | null) ?? null;
+    let err = caughtError;\`;
+  if (!execSource.includes(needle)) {
+    throw new Error("deliver-queue-execute diagnostic insertion point not found");
+  }
+  execSource = execSource.replace(needle, replacement);
+  fs.writeFileSync(execPath, execSource);
+}
+
+let queueSource = fs.readFileSync(queuePath, "utf8");
+if (!queueSource.includes("[whatsapp-queue-handoff-diagnostic]")) {
+  const needle = \`  } catch (error) {
+    throw queueOwner ? queueOwner.project(error) : error;
+  }
+}\`;
+  const replacement = \`  } catch (error) {
+    if (channel === "whatsapp") {
+      log.warn(
+        \\\`[whatsapp-queue-handoff-diagnostic] queueId=\\\${queueId ?? "none"} created=\\\${queued?.created === true} producerClaim=\\\${queued?.producerClaimId ? "present" : "missing"} custody=\\\${queueOwner?.custody ?? "none"} reusePending=\\\${Boolean(params.reusePendingDeliveryIntent)} stableClaim=\\\${stableIntentClaimHeld} aborted=\\\${Boolean(params.abortSignal?.aborted)} error=\\\${formatErrorMessage(error)}\\\`,
+      );
     }
-    return (defaultSlot.runtime as T | null) ?? null;
-  };
-
-  return {
-    setRuntime(next: T) {
-      resolveSlot().runtime = next;
-    },
-    clearRuntime() {
-      resolveSlot().runtime = null;
-    },
-    tryGetRuntime() {
-      return readRuntime();
-    },
-    getRuntime() {
-      const runtime = readRuntime();
-      if (runtime == null) {
-        throw new Error(resolved.errorMessage);
-      }
-      return runtime;
-    },
-  };`;
-  if (!store.includes(runtimeNeedle)) throw new Error("runtime-store read behavior patch target not found");
-  store = store.replace(runtimeNeedle, runtimeReplacement);
-  fs.writeFileSync(storePath, store);
-}
-
-let wa = fs.readFileSync(waPath, "utf8");
-if (!wa.includes("fallbackToDefaultWhenInstanceEmpty: true")) {
-  const waNeedle = `const channelRuntimeStore = createPluginRuntimeStore<PluginRuntime["channel"]>({
-  key: "plugin-runtime:whatsapp:channel-context-owner",
-  errorMessage: "WhatsApp channel runtime not initialized",
-});`;
-  const waReplacement = `const channelRuntimeStore = createPluginRuntimeStore<PluginRuntime["channel"]>({
-  key: "plugin-runtime:whatsapp:channel-context-owner",
-  errorMessage: "WhatsApp channel runtime not initialized",
-  fallbackToDefaultWhenInstanceEmpty: true,
-});`;
-  if (!wa.includes(waNeedle)) throw new Error("WhatsApp channel runtime patch target not found");
-  wa = wa.replace(waNeedle, waReplacement);
-  fs.writeFileSync(waPath, wa);
-}
-
-let test = fs.readFileSync(testPath, "utf8");
-if (!test.includes('from "../plugins/plugin-instance.js"')) {
-  const importNeedle = 'import { describe, expect, test } from "vitest";';
-  if (!test.includes(importNeedle)) throw new Error("runtime-store test import target not found");
-  test = test.replace(importNeedle, importNeedle + '\nimport { PluginInstance } from "../plugins/plugin-instance.js";');
-}
-if (!test.includes("falls back to the named runtime only when explicitly opted in")) {
-  const closing = "\n});\n";
-  const idx = test.lastIndexOf(closing);
-  if (idx < 0) throw new Error("runtime-store test suite closing marker not found");
-  const cases = `
-
-  test("keeps an empty instance slot isolated by default", () => {
-    const store = createPluginRuntimeStore<{ value: string }>({
-      key: "instance-isolation-default",
-      errorMessage: "runtime not initialized",
-    });
-    store.setRuntime({ value: "process" });
-
-    const instance = new PluginInstance("runtime-store-isolation-test");
-    expect(instance.run(() => store.tryGetRuntime())).toBeNull();
-    expect(store.getRuntime()).toEqual({ value: "process" });
-  });
-
-  test("falls back to the named runtime only when explicitly opted in", () => {
-    const store = createPluginRuntimeStore<{ value: string }>({
-      key: "instance-opt-in-fallback",
-      errorMessage: "runtime not initialized",
-      fallbackToDefaultWhenInstanceEmpty: true,
-    });
-    store.setRuntime({ value: "process" });
-
-    const instance = new PluginInstance("runtime-store-fallback-test");
-    instance.run(() => {
-      expect(store.getRuntime()).toEqual({ value: "process" });
-      store.setRuntime({ value: "instance" });
-      expect(store.getRuntime()).toEqual({ value: "instance" });
-      store.clearRuntime();
-      expect(store.getRuntime()).toEqual({ value: "process" });
-    });
-
-    expect(store.getRuntime()).toEqual({ value: "process" });
-  });
-`;
-  test = test.slice(0, idx) + cases + test.slice(idx);
-  fs.writeFileSync(testPath, test);
+    throw queueOwner ? queueOwner.project(error) : error;
+  }
+}\`;
+  const idx = queueSource.lastIndexOf(needle);
+  if (idx < 0) {
+    throw new Error("deliver-queue diagnostic insertion point not found");
+  }
+  queueSource =
+    queueSource.slice(0, idx) + replacement + queueSource.slice(idx + needle.length);
+  fs.writeFileSync(queuePath, queueSource);
 }
 NODE
 
 RUN pnpm install --no-frozen-lockfile
-# Regression gate: do not build/deploy if runtime-store isolation/fallback tests fail.
-RUN pnpm exec vitest run src/plugin-sdk/runtime-store.test.ts
 RUN pnpm build
 ENV OPENCLAW_PREFER_PNPM=1
 RUN pnpm ui:install && pnpm ui:build
