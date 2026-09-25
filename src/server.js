@@ -669,12 +669,28 @@ async function runC1ContextDiagnosticV1() {
       0,
     );
 
-    stage = "context-command-event";
+    stage = "context-command";
     const runId = "c1-context-" + (process.env.RAILWAY_DEPLOYMENT_ID || process.pid);
-    const eventScript = path.join(process.cwd(), "src", "c1-context-event.mts");
+    const commandParams = {
+      sessionKey,
+      agentId: "main",
+      message: "/context json",
+      deliver: false,
+      idempotencyKey: runId,
+    };
     const commandResult = await runCmd(
       OPENCLAW_NODE,
-      ["--import", "/openclaw/scripts/tsx.mjs", eventScript, sessionKey, runId],
+      clawArgs([
+        "gateway",
+        "call",
+        "chat.send",
+        "--params",
+        JSON.stringify(commandParams),
+        "--expect-final",
+        "--timeout",
+        "30000",
+        "--json",
+      ]),
       {
         env: {
           ...process.env,
@@ -684,19 +700,70 @@ async function runC1ContextDiagnosticV1() {
         timeoutMs: 45_000,
       },
     );
-    if (commandResult.code !== 0) throw new Error("context event command failed");
+    if (commandResult.code !== 0) throw new Error("context command failed");
 
-    stage = "parse-context-event";
-    const markerPrefix = "C1_CONTEXT_B64:";
-    const markerLine = String(commandResult.stdout || "")
-      .split(/\r?\n/u)
+    stage = "context-history";
+    const historyParams = {
+      sessionKey,
+      agentId: "main",
+      limit: 50,
+    };
+    const historyResult = await runCmd(
+      OPENCLAW_NODE,
+      clawArgs([
+        "gateway",
+        "call",
+        "chat.history",
+        "--params",
+        JSON.stringify(historyParams),
+        "--timeout",
+        "10000",
+        "--json",
+      ]),
+      {
+        env: {
+          ...process.env,
+          OPENCLAW_STATE_DIR: STATE_DIR,
+          OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
+        },
+        timeoutMs: 20_000,
+      },
+    );
+    if (historyResult.code !== 0) throw new Error("context history failed");
+
+    stage = "parse-context-history";
+    const historyPayload = JSON.parse(historyResult.stdout || "{}");
+    const historyMessages = Array.isArray(historyPayload?.messages)
+      ? historyPayload.messages
+      : [];
+    const commandReply = historyMessages
+      .slice()
       .reverse()
-      .find((line) => line.startsWith(markerPrefix));
-    if (!markerLine) throw new Error("context event marker missing");
-    const contextText = Buffer.from(
-      markerLine.slice(markerPrefix.length),
-      "base64",
-    ).toString("utf8");
+      .find(
+        (message) =>
+          message &&
+          typeof message === "object" &&
+          message.role === "assistant" &&
+          message.idempotencyKey === runId,
+      );
+    if (!commandReply) throw new Error("context history reply missing");
+
+    const collectText = (value, depth = 0) => {
+      if (depth > 10 || value == null) return [];
+      if (typeof value === "string") return [value];
+      if (Array.isArray(value)) {
+        return value.flatMap((item) => collectText(item, depth + 1));
+      }
+      if (typeof value === "object") {
+        return Object.values(value).flatMap((item) => collectText(item, depth + 1));
+      }
+      return [];
+    };
+    const contextText = collectText(commandReply)
+      .map((value) => value.trim())
+      .find((value) => value.startsWith("{") && value.includes("\"report\""));
+    if (!contextText) throw new Error("context history JSON missing");
+
     const contextPayload = JSON.parse(contextText);
     if (!contextPayload?.report || !contextPayload?.session) {
       throw new Error("context payload invalid");
@@ -736,8 +803,8 @@ async function runC1ContextDiagnosticV1() {
     console.log(
       "[c1-context-v1] " +
         JSON.stringify({
-          version: 8,
-          commandPath: "gateway-chat-event-context-json",
+          version: 9,
+          commandPath: "gateway-chat-send-history-context-json",
           modelTurnSubmitted: 0,
           reportSource: String(report?.source ?? "unknown"),
           source: {
