@@ -72,59 +72,59 @@ const waPath = "extensions/whatsapp/src/runtime.ts";
 const testPath = "src/plugin-sdk/runtime-store.test.ts";
 
 for (const p of [storePath, waPath, testPath]) {
-  if (!fs.existsSync(p)) throw new Error(\`WhatsApp runtime patch target missing: \${p}\`);
+  if (!fs.existsSync(p)) throw new Error(`WhatsApp runtime patch target missing: ${p}`);
 }
 
 let store = fs.readFileSync(storePath, "utf8");
 
 if (!store.includes("fallbackToDefaultWhenInstanceEmpty")) {
-  const keyTypeNeedle = \`type PluginRuntimeStoreKeyOptions = {
+  const keyTypeNeedle = `type PluginRuntimeStoreKeyOptions = {
   /** Explicit global registry key for shared runtime slots. */
   key: string;
   /** Error thrown by getRuntime before setRuntime initializes this slot. */
   errorMessage: string;
-};\`;
-  const keyTypeReplacement = \`type PluginRuntimeStoreKeyOptions = {
+};`;
+  const keyTypeReplacement = `type PluginRuntimeStoreKeyOptions = {
   /** Explicit global registry key for shared runtime slots. */
   key: string;
   /** Error thrown by getRuntime before setRuntime initializes this slot. */
   errorMessage: string;
   /** Read the named process-lifetime slot when the active instance slot is empty. */
   fallbackToDefaultWhenInstanceEmpty?: boolean;
-};\`;
+};`;
   if (!store.includes(keyTypeNeedle)) throw new Error("runtime-store key options patch target not found");
   store = store.replace(keyTypeNeedle, keyTypeReplacement);
 
-  const pluginTypeNeedle = \`type PluginRuntimeStorePluginOptions = {
+  const pluginTypeNeedle = `type PluginRuntimeStorePluginOptions = {
   /** Plugin id used to derive a stable cross-module runtime slot key. */
   pluginId: string;
   /** Error thrown by getRuntime before setRuntime initializes this slot. */
   errorMessage: string;
-};\`;
-  const pluginTypeReplacement = \`type PluginRuntimeStorePluginOptions = {
+};`;
+  const pluginTypeReplacement = `type PluginRuntimeStorePluginOptions = {
   /** Plugin id used to derive a stable cross-module runtime slot key. */
   pluginId: string;
   /** Error thrown by getRuntime before setRuntime initializes this slot. */
   errorMessage: string;
   /** Read the named process-lifetime slot when the active instance slot is empty. */
   fallbackToDefaultWhenInstanceEmpty?: boolean;
-};\`;
+};`;
   if (!store.includes(pluginTypeNeedle)) throw new Error("runtime-store plugin options patch target not found");
   store = store.replace(pluginTypeNeedle, pluginTypeReplacement);
 
-  const resolveNeedle = \`    return {
+  const resolveNeedle = `    return {
       key: pluginRuntimeStoreKeyForPluginId(options.pluginId),
       errorMessage: options.errorMessage,
-    };\`;
-  const resolveReplacement = \`    return {
+    };`;
+  const resolveReplacement = `    return {
       key: pluginRuntimeStoreKeyForPluginId(options.pluginId),
       errorMessage: options.errorMessage,
       fallbackToDefaultWhenInstanceEmpty: options.fallbackToDefaultWhenInstanceEmpty,
-    };\`;
+    };`;
   if (!store.includes(resolveNeedle)) throw new Error("runtime-store resolve options patch target not found");
   store = store.replace(resolveNeedle, resolveReplacement);
 
-  const runtimeNeedle = \`  const resolveSlot = () => getPluginInstanceRuntimeSlot(instanceKey) ?? defaultSlot;
+  const runtimeNeedle = `  const resolveSlot = () => getPluginInstanceRuntimeSlot(instanceKey) ?? defaultSlot;
 
   return {
     setRuntime(next: T) {
@@ -143,8 +143,8 @@ if (!store.includes("fallbackToDefaultWhenInstanceEmpty")) {
       }
       return slot.runtime as T;
     },
-  };\`;
-  const runtimeReplacement = \`  const resolveSlot = () => getPluginInstanceRuntimeSlot(instanceKey) ?? defaultSlot;
+  };`;
+  const runtimeReplacement = `  const resolveSlot = () => getPluginInstanceRuntimeSlot(instanceKey) ?? defaultSlot;
   const readRuntime = (): T | null => {
     const instanceSlot = getPluginInstanceRuntimeSlot(instanceKey);
     if (!instanceSlot) {
@@ -173,7 +173,7 @@ if (!store.includes("fallbackToDefaultWhenInstanceEmpty")) {
       }
       return runtime;
     },
-  };\`;
+  };`;
   if (!store.includes(runtimeNeedle)) throw new Error("runtime-store read behavior patch target not found");
   store = store.replace(runtimeNeedle, runtimeReplacement);
   fs.writeFileSync(storePath, store);
@@ -181,15 +181,15 @@ if (!store.includes("fallbackToDefaultWhenInstanceEmpty")) {
 
 let wa = fs.readFileSync(waPath, "utf8");
 if (!wa.includes("fallbackToDefaultWhenInstanceEmpty: true")) {
-  const waNeedle = \`const channelRuntimeStore = createPluginRuntimeStore<PluginRuntime["channel"]>({
+  const waNeedle = `const channelRuntimeStore = createPluginRuntimeStore<PluginRuntime["channel"]>({
   key: "plugin-runtime:whatsapp:channel-context-owner",
   errorMessage: "WhatsApp channel runtime not initialized",
-});\`;
-  const waReplacement = \`const channelRuntimeStore = createPluginRuntimeStore<PluginRuntime["channel"]>({
+});`;
+  const waReplacement = `const channelRuntimeStore = createPluginRuntimeStore<PluginRuntime["channel"]>({
   key: "plugin-runtime:whatsapp:channel-context-owner",
   errorMessage: "WhatsApp channel runtime not initialized",
   fallbackToDefaultWhenInstanceEmpty: true,
-});\`;
+});`;
   if (!wa.includes(waNeedle)) throw new Error("WhatsApp channel runtime patch target not found");
   wa = wa.replace(waNeedle, waReplacement);
   fs.writeFileSync(waPath, wa);
@@ -205,7 +205,7 @@ if (!test.includes("falls back to the named runtime only when explicitly opted i
   const closing = "\n});\n";
   const idx = test.lastIndexOf(closing);
   if (idx < 0) throw new Error("runtime-store test suite closing marker not found");
-  const cases = \`
+  const cases = `
 
   test("keeps an empty instance slot isolated by default", () => {
     const store = createPluginRuntimeStore<{ value: string }>({
@@ -238,7 +238,7 @@ if (!test.includes("falls back to the named runtime only when explicitly opted i
 
     expect(store.getRuntime()).toEqual({ value: "process" });
   });
-\`;
+`;
   test = test.slice(0, idx) + cases + test.slice(idx);
   fs.writeFileSync(testPath, test);
 }
