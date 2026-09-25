@@ -9,7 +9,8 @@ import {
   uuidv7,
   writeResearchBrief,
 } from "./jarvis-research-system-v1.js";
-import { resolveOpenRouterKeyForRuntime } from "./openrouter-key-audit.js";\nimport { verifyResearchSources } from "./jarvis-research-verification-v1.js";
+import { resolveOpenRouterKeyForRuntime } from "./openrouter-key-audit.js";
+import { verifyResearchSources } from "./jarvis-research-verification-v1.js";
 
 const START="JARVIS_PACKET_START";
 const END="JARVIS_PACKET_END";
@@ -315,7 +316,7 @@ export async function runJarvisResearchCommissioningV1(){
   }
 
   const summary={
-    version:"v1.3",startedAt,finishedAt:new Date().toISOString(),brief_id:brief.brief_id,run_id:runId,
+    version:"v1.5",startedAt,finishedAt:new Date().toISOString(),brief_id:brief.brief_id,run_id:runId,
     pass:!error&&results.length===2,
     researchers:results,
     error,
