@@ -15,7 +15,7 @@ import { runJarvisAdviserMemoryCommissioningV1 } from "./jarvis-adviser-memory-c
 import { runJarvisSecurityAuditV1 } from "./jarvis-security-audit.js";
 import { runOpenRouterKeyAuditV1 } from "./openrouter-key-audit.js";
 import { applyJarvisResearchSystemV1 } from "./jarvis-research-system-v1.js";
-import { applyJarvisSeatConfigV1 } from "./jarvis-seat-config-v1.js";
+import { applyJarvisSeatConfigV1 } from "./jarvis-seat-config-v1.js";\nimport { runJarvisResearchCommissioningV1 } from "./jarvis-research-commissioning.js";
 
 // Migrate deprecated CLAWDBOT_* env vars → OPENCLAW_* so existing Railway deployments
 // keep working. Users should update their Railway Variables to use the new names.
@@ -292,6 +292,17 @@ function launchJarvisAgentSmokeV1() {
     openclawNode: OPENCLAW_NODE,
   }).catch((err) => {
     console.warn(`[agent-smoke-v1] failed: ${String(err)}`);
+  });
+}
+
+function launchJarvisResearchCommissioningV1() {
+  void runJarvisResearchCommissioningV1({
+    workspaceDir: WORKSPACE_DIR,
+    runCmd,
+    clawArgs,
+    openclawNode: OPENCLAW_NODE,
+  }).catch((err) => {
+    console.warn(`[research-commission-v1] failed: ${String(err)}`);
   });
 }
 
