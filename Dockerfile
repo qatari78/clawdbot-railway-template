@@ -59,195 +59,208 @@ s = s.replace(old, replacement);
 fs.writeFileSync(p, s);
 NODE
 
-# WhatsApp live-listener runtime fix:
-# Outbound sends can execute inside a plugin-instance scope whose named slot exists
-# but is still null. That empty instance slot must not mask WhatsApp's deliberately
-# process-lifetime channel-context-owner runtime. Make fallback opt-in so generic
-# plugin-instance isolation semantics remain unchanged, and keep writes instance-scoped.
+# WhatsApp native-delivery repair:
+# Keep the connection-owning channel runtime process-wide while leaving ordinary
+# plugin runtime helpers instance-scoped. This fixes cross-instance outbound sends
+# without weakening generic runtime-store isolation.
 RUN node <<'NODE'
 const fs = require("fs");
 
-const storePath = "src/plugin-sdk/runtime-store.ts";
-const waPath = "extensions/whatsapp/src/runtime.ts";
-const testPath = "src/plugin-sdk/runtime-store.test.ts";
+const runtimePath = "extensions/whatsapp/src/runtime.ts";
+const testPath = "extensions/whatsapp/src/native-delivery.cross-instance.test.ts";
 
-for (const p of [storePath, waPath, testPath]) {
-  if (!fs.existsSync(p)) throw new Error(`WhatsApp runtime patch target missing: ${p}`);
+if (!fs.existsSync(runtimePath)) throw new Error("WhatsApp runtime patch target missing");
+
+let runtime = fs.readFileSync(runtimePath, "utf8");
+
+const originalImport =
+  'import type { PluginRuntime } from "openclaw/plugin-sdk/core";\n' +
+  'import { createPluginRuntimeStore } from "openclaw/plugin-sdk/runtime-store";';
+const repairedImport =
+  'import type { PluginRuntime } from "openclaw/plugin-sdk/core";\n' +
+  'import { resolveGlobalSingleton } from "openclaw/plugin-sdk/global-singleton";\n' +
+  'import { createPluginRuntimeStore } from "openclaw/plugin-sdk/runtime-store";';
+
+if (!runtime.includes('resolveGlobalSingleton')) {
+  if (!runtime.includes(originalImport)) throw new Error("WhatsApp runtime import target not found");
+  runtime = runtime.replace(originalImport, repairedImport);
 }
 
-let store = fs.readFileSync(storePath, "utf8");
+const oldOwner = [
+  'const channelRuntimeStore = createPluginRuntimeStore<PluginRuntime["channel"]>({',
+  '  key: "plugin-runtime:whatsapp:channel-context-owner",',
+  '  errorMessage: "WhatsApp channel runtime not initialized",',
+  '  fallbackToDefaultWhenInstanceEmpty: true,',
+  '});',
+].join("\n");
 
-if (!store.includes("fallbackToDefaultWhenInstanceEmpty")) {
-  const keyTypeNeedle = `type PluginRuntimeStoreKeyOptions = {
-  /** Explicit global registry key for shared runtime slots. */
-  key: string;
-  /** Error thrown by getRuntime before setRuntime initializes this slot. */
-  errorMessage: string;
-};`;
-  const keyTypeReplacement = `type PluginRuntimeStoreKeyOptions = {
-  /** Explicit global registry key for shared runtime slots. */
-  key: string;
-  /** Error thrown by getRuntime before setRuntime initializes this slot. */
-  errorMessage: string;
-  /** Read the named process-lifetime slot when the active instance slot is empty. */
-  fallbackToDefaultWhenInstanceEmpty?: boolean;
-};`;
-  if (!store.includes(keyTypeNeedle)) throw new Error("runtime-store key options patch target not found");
-  store = store.replace(keyTypeNeedle, keyTypeReplacement);
+const oldOwnerVanilla = [
+  'const channelRuntimeStore = createPluginRuntimeStore<PluginRuntime["channel"]>({',
+  '  key: "plugin-runtime:whatsapp:channel-context-owner",',
+  '  errorMessage: "WhatsApp channel runtime not initialized",',
+  '});',
+].join("\n");
 
-  const pluginTypeNeedle = `type PluginRuntimeStorePluginOptions = {
-  /** Plugin id used to derive a stable cross-module runtime slot key. */
-  pluginId: string;
-  /** Error thrown by getRuntime before setRuntime initializes this slot. */
-  errorMessage: string;
-};`;
-  const pluginTypeReplacement = `type PluginRuntimeStorePluginOptions = {
-  /** Plugin id used to derive a stable cross-module runtime slot key. */
-  pluginId: string;
-  /** Error thrown by getRuntime before setRuntime initializes this slot. */
-  errorMessage: string;
-  /** Read the named process-lifetime slot when the active instance slot is empty. */
-  fallbackToDefaultWhenInstanceEmpty?: boolean;
-};`;
-  if (!store.includes(pluginTypeNeedle)) throw new Error("runtime-store plugin options patch target not found");
-  store = store.replace(pluginTypeNeedle, pluginTypeReplacement);
+const newOwner = [
+  '// Active connection leases belong to the channel runtime that registered them.',
+  '// Outbound delivery may run inside a different managed plugin instance, so this',
+  '// owner must outlive instance replacement while account-scoped leases remain authoritative.',
+  'const channelContextOwner = resolveGlobalSingleton(',
+  '  Symbol.for("openclaw.whatsapp.channelContextOwner"),',
+  '  (): { channel: PluginRuntime["channel"] | null } => ({ channel: null }),',
+  ');',
+].join("\n");
 
-  const resolveNeedle = `    return {
-      key: pluginRuntimeStoreKeyForPluginId(options.pluginId),
-      errorMessage: options.errorMessage,
-    };`;
-  const resolveReplacement = `    return {
-      key: pluginRuntimeStoreKeyForPluginId(options.pluginId),
-      errorMessage: options.errorMessage,
-      fallbackToDefaultWhenInstanceEmpty: options.fallbackToDefaultWhenInstanceEmpty,
-    };`;
-  if (!store.includes(resolveNeedle)) throw new Error("runtime-store resolve options patch target not found");
-  store = store.replace(resolveNeedle, resolveReplacement);
+if (!runtime.includes('Symbol.for("openclaw.whatsapp.channelContextOwner")')) {
+  if (runtime.includes(oldOwner)) {
+    runtime = runtime.replace(oldOwner, newOwner);
+  } else if (runtime.includes(oldOwnerVanilla)) {
+    runtime = runtime.replace(oldOwnerVanilla, newOwner);
+  } else {
+    throw new Error("WhatsApp channel owner target not found");
+  }
+}
 
-  const runtimeNeedle = `  const resolveSlot = () => getPluginInstanceRuntimeSlot(instanceKey) ?? defaultSlot;
+const oldSetter = [
+  'function setWhatsAppRuntime(next: PluginRuntime): void {',
+  '  // Plugin registry reloads create fresh runtime objects. Live connection leases must remain',
+  '  // readable by outbound sends until their account task explicitly disposes them.',
+  '  if (!channelRuntimeStore.tryGetRuntime()) {',
+  '    channelRuntimeStore.setRuntime(next.channel);',
+  '  }',
+  '  runtimeStore.setRuntime(next);',
+  '}',
+  '',
+  'const getWhatsAppRuntime = runtimeStore.getRuntime;',
+  'const getOptionalWhatsAppRuntime = runtimeStore.tryGetRuntime;',
+  'const getWhatsAppChannelRuntime = channelRuntimeStore.getRuntime;',
+  'const getOptionalWhatsAppChannelRuntime = channelRuntimeStore.tryGetRuntime;',
+].join("\n");
 
-  return {
-    setRuntime(next: T) {
-      resolveSlot().runtime = next;
-    },
-    clearRuntime() {
-      resolveSlot().runtime = null;
-    },
-    tryGetRuntime() {
-      return (resolveSlot().runtime as T | null) ?? null;
-    },
-    getRuntime() {
-      const slot = resolveSlot();
-      if (slot.runtime == null) {
-        throw new Error(resolved.errorMessage);
+const newSetter = [
+  'function setWhatsAppRuntime(next: PluginRuntime): void {',
+  '  // Plugin registry reloads create fresh runtime objects. Live connection leases must remain',
+  '  // readable by outbound sends until their account task explicitly disposes them.',
+  '  if (!channelContextOwner.channel) {',
+  '    channelContextOwner.channel = next.channel;',
+  '  }',
+  '  runtimeStore.setRuntime(next);',
+  '}',
+  '',
+  'const getWhatsAppRuntime = runtimeStore.getRuntime;',
+  'const getOptionalWhatsAppRuntime = runtimeStore.tryGetRuntime;',
+  'function getOptionalWhatsAppChannelRuntime(): PluginRuntime["channel"] | null {',
+  '  return channelContextOwner.channel;',
+  '}',
+  '',
+  'function getWhatsAppChannelRuntime(): PluginRuntime["channel"] {',
+  '  const channel = getOptionalWhatsAppChannelRuntime();',
+  '  if (!channel) {',
+  '    throw new Error("WhatsApp channel runtime not initialized");',
+  '  }',
+  '  return channel;',
+  '}',
+].join("\n");
+
+if (!runtime.includes('function getOptionalWhatsAppChannelRuntime(): PluginRuntime["channel"] | null')) {
+  if (!runtime.includes(oldSetter)) throw new Error("WhatsApp runtime setter target not found");
+  runtime = runtime.replace(oldSetter, newSetter);
+}
+
+if (runtime.includes("fallbackToDefaultWhenInstanceEmpty")) {
+  throw new Error("Generic runtime-store fallback leaked into repaired WhatsApp runtime");
+}
+
+fs.writeFileSync(runtimePath, runtime);
+
+const test = `import { registerChannelRuntimeContext } from "openclaw/plugin-sdk/channel-runtime-context";
+import type { PluginRuntime } from "openclaw/plugin-sdk/core";
+import { describe, expect, it } from "vitest";
+import { PluginInstance } from "../../../src/plugins/plugin-instance.js";
+import {
+  getWhatsAppConnectionController,
+  WHATSAPP_CONNECTION_CONTROLLER_CAPABILITY,
+} from "./connection-controller-runtime-context.js";
+import {
+  getOptionalWhatsAppChannelRuntime,
+  getWhatsAppRuntime,
+  setWhatsAppRuntime,
+} from "./runtime.js";
+
+describe("WhatsApp cross-instance native delivery", () => {
+  it("keeps the connection-owning channel context visible across managed instances", async () => {
+    const contexts = new Map<string, unknown>();
+    const channel = {
+      runtimeContexts: {
+        register: ({ accountId, capability, context }: { accountId?: string; capability?: string; context: unknown }) => {
+          const key = `${accountId ?? ""}:${capability ?? ""}`;
+          contexts.set(key, context);
+          return { dispose: () => contexts.delete(key) };
+        },
+        get: ({ accountId, capability }: { accountId?: string; capability?: string }) =>
+          contexts.get(`${accountId ?? ""}:${capability ?? ""}`),
+        watch: () => () => {},
+      },
+    } as PluginRuntime["channel"];
+
+    const replacementChannel = {
+      runtimeContexts: {
+        get: () => undefined,
+        register: () => ({ dispose: () => {} }),
+        watch: () => () => {},
+      },
+    } as unknown as PluginRuntime["channel"];
+
+    const ownerRuntime = { channel } as PluginRuntime;
+    const outboundRuntime = { channel: replacementChannel } as PluginRuntime;
+    const owner = new PluginInstance("whatsapp");
+    const outbound = new PluginInstance("whatsapp");
+    const listener = {};
+    const controller = {
+      getActiveListener: () => listener,
+      getCurrentSock: () => null,
+      getSelfIdentity: () => null,
+    };
+
+    try {
+      owner.run(() => setWhatsAppRuntime(ownerRuntime));
+      const lease = registerChannelRuntimeContext({
+        channelRuntime: channel,
+        channelId: "whatsapp",
+        accountId: "default",
+        capability: WHATSAPP_CONNECTION_CONTROLLER_CAPABILITY,
+        context: controller,
+      });
+
+      try {
+        outbound.run(() => setWhatsAppRuntime(outboundRuntime));
+
+        expect(outbound.run(() => getWhatsAppRuntime())).toBe(outboundRuntime);
+        expect(outbound.run(() => getOptionalWhatsAppChannelRuntime())).toBe(channel);
+        expect(outbound.run(() => getWhatsAppConnectionController("default"))).toBe(controller);
+        expect(outbound.run(() => getWhatsAppConnectionController("other"))).toBeNull();
+      } finally {
+        lease?.dispose();
       }
-      return slot.runtime as T;
-    },
-  };`;
-  const runtimeReplacement = `  const resolveSlot = () => getPluginInstanceRuntimeSlot(instanceKey) ?? defaultSlot;
-  const readRuntime = (): T | null => {
-    const instanceSlot = getPluginInstanceRuntimeSlot(instanceKey);
-    if (!instanceSlot) {
-      return (defaultSlot.runtime as T | null) ?? null;
+
+      expect(outbound.run(() => getWhatsAppConnectionController("default"))).toBeNull();
+    } finally {
+      await outbound.dispose();
+      await owner.dispose();
     }
-    if (instanceSlot.runtime != null || !resolved.fallbackToDefaultWhenInstanceEmpty) {
-      return (instanceSlot.runtime as T | null) ?? null;
-    }
-    return (defaultSlot.runtime as T | null) ?? null;
-  };
-
-  return {
-    setRuntime(next: T) {
-      resolveSlot().runtime = next;
-    },
-    clearRuntime() {
-      resolveSlot().runtime = null;
-    },
-    tryGetRuntime() {
-      return readRuntime();
-    },
-    getRuntime() {
-      const runtime = readRuntime();
-      if (runtime == null) {
-        throw new Error(resolved.errorMessage);
-      }
-      return runtime;
-    },
-  };`;
-  if (!store.includes(runtimeNeedle)) throw new Error("runtime-store read behavior patch target not found");
-  store = store.replace(runtimeNeedle, runtimeReplacement);
-  fs.writeFileSync(storePath, store);
-}
-
-let wa = fs.readFileSync(waPath, "utf8");
-if (!wa.includes("fallbackToDefaultWhenInstanceEmpty: true")) {
-  const waNeedle = `const channelRuntimeStore = createPluginRuntimeStore<PluginRuntime["channel"]>({
-  key: "plugin-runtime:whatsapp:channel-context-owner",
-  errorMessage: "WhatsApp channel runtime not initialized",
-});`;
-  const waReplacement = `const channelRuntimeStore = createPluginRuntimeStore<PluginRuntime["channel"]>({
-  key: "plugin-runtime:whatsapp:channel-context-owner",
-  errorMessage: "WhatsApp channel runtime not initialized",
-  fallbackToDefaultWhenInstanceEmpty: true,
-});`;
-  if (!wa.includes(waNeedle)) throw new Error("WhatsApp channel runtime patch target not found");
-  wa = wa.replace(waNeedle, waReplacement);
-  fs.writeFileSync(waPath, wa);
-}
-
-let test = fs.readFileSync(testPath, "utf8");
-if (!test.includes('from "../plugins/plugin-instance.js"')) {
-  const importNeedle = 'import { describe, expect, test } from "vitest";';
-  if (!test.includes(importNeedle)) throw new Error("runtime-store test import target not found");
-  test = test.replace(importNeedle, importNeedle + '\nimport { PluginInstance } from "../plugins/plugin-instance.js";');
-}
-if (!test.includes("falls back to the named runtime only when explicitly opted in")) {
-  const closing = "\n});\n";
-  const idx = test.lastIndexOf(closing);
-  if (idx < 0) throw new Error("runtime-store test suite closing marker not found");
-  const cases = `
-
-  test("keeps an empty instance slot isolated by default", () => {
-    const store = createPluginRuntimeStore<{ value: string }>({
-      key: "instance-isolation-default",
-      errorMessage: "runtime not initialized",
-    });
-    store.setRuntime({ value: "process" });
-
-    const instance = new PluginInstance("runtime-store-isolation-test");
-    expect(instance.run(() => store.tryGetRuntime())).toBeNull();
-    expect(store.getRuntime()).toEqual({ value: "process" });
   });
-
-  test("falls back to the named runtime only when explicitly opted in", () => {
-    const store = createPluginRuntimeStore<{ value: string }>({
-      key: "instance-opt-in-fallback",
-      errorMessage: "runtime not initialized",
-      fallbackToDefaultWhenInstanceEmpty: true,
-    });
-    store.setRuntime({ value: "process" });
-
-    const instance = new PluginInstance("runtime-store-fallback-test");
-    instance.run(() => {
-      expect(store.getRuntime()).toEqual({ value: "process" });
-      store.setRuntime({ value: "instance" });
-      expect(store.getRuntime()).toEqual({ value: "instance" });
-      store.clearRuntime();
-      expect(store.getRuntime()).toEqual({ value: "process" });
-    });
-
-    expect(store.getRuntime()).toEqual({ value: "process" });
-  });
+});
 `;
-  test = test.slice(0, idx) + cases + test.slice(idx);
-  fs.writeFileSync(testPath, test);
-}
+
+fs.writeFileSync(testPath, test);
 NODE
 
-
+# Regression gates: reproduce the managed-instance failure mode and preserve
+# connection-controller lifecycle/account scoping before building the image.
 RUN pnpm install --no-frozen-lockfile
-# Regression gate: do not build/deploy if runtime-store isolation/fallback tests fail.
-RUN pnpm exec vitest run src/plugin-sdk/runtime-store.test.ts
+RUN pnpm exec vitest run \
+  extensions/whatsapp/src/native-delivery.cross-instance.test.ts \
+  extensions/whatsapp/src/connection-controller.test.ts
 RUN pnpm build
 ENV OPENCLAW_PREFER_PNPM=1
 RUN pnpm ui:install && pnpm ui:build
