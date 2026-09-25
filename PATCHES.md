@@ -7,19 +7,7 @@ checkout SHA and fails if it differs.
 The items below are local compatibility changes applied on top of that exact
 upstream source. Review each one before changing the OpenClaw pin.
 
-## 1. Extension dependency compatibility
-
-**Location:** `Dockerfile`
-
-The build normalizes extension `package.json` references to the host
-`openclaw` package when they use unpublished minimum-version or
-`workspace:*` constraints. This exists to keep the source build installable
-when extension manifests reference workspace-only package versions.
-
-**Validation:** the subsequent `pnpm install` and full OpenClaw build must
-complete successfully.
-
-## 2. Browser dashboard-selector compatibility
+## 1. Browser dashboard-selector compatibility
 
 **Location:** inline Node patch in `Dockerfile`
 
@@ -32,7 +20,7 @@ silently applying a different edit.
 **Removal condition:** upstream browser handling makes the compatibility shim
 unnecessary.
 
-## 3. WhatsApp cross-instance native delivery
+## 2. WhatsApp cross-instance native delivery
 
 **Location:** `build/patch-whatsapp-cross-instance.cjs`
 

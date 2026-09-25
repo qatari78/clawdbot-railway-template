@@ -29,14 +29,6 @@ RUN set -eux; \
   test "$actual_sha" = "$expected_sha"; \
   printf 'OpenClaw source verified: v2026.9.6 %s\n' "$actual_sha"
 
-# Patch: relax version requirements for packages that may reference unpublished versions.
-# Apply to all extension package.json files to handle workspace protocol (workspace:*).
-RUN set -eux; \
-  find ./extensions -name 'package.json' -type f | while read -r f; do \
-    sed -i -E 's/"openclaw"[[:space:]]*:[[:space:]]*">=[^"]+"/"openclaw": "*"/g' "$f"; \
-    sed -i -E 's/"openclaw"[[:space:]]*:[[:space:]]*"workspace:[^"]+"/"openclaw": "*"/g' "$f"; \
-  done
-
 # Compatibility patch for ordinary URL navigation:
 # If an agent accidentally supplies a dashboard selector together with a URL,
 # treat it as normal managed-browser navigation. Real dashboard opens never carry a URL.
