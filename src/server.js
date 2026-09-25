@@ -2050,7 +2050,7 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
   await ensureJarvisLobsterV1();
 
   // Apply Jarvis operational tool/browser settings directly, avoiding slow CLI chains.
-  applyJarvisOperationalDefaults();
+  applyJarvisOperationalDefaults();\n\n  // OpenRouter server-tool research commissioning is gateway-independent.\n  launchJarvisResearchCommissioningV1();
 
   // Optional operator hook to install/persist extra tools under /data.
   // This is intentionally best-effort and should be used to set up persistent
@@ -2098,7 +2098,6 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
       launchOpenRouterKeyAuditV1();
       launchJarvisSecurityAuditV1();
       launchJarvisAgentSmokeV1();
-      launchJarvisResearchCommissioningV1();
       launchJarvisAdviserMemoryCommissioningV1();
     } catch (err) {
       console.error(`[wrapper] gateway failed to start at boot: ${String(err)}`);
@@ -2113,7 +2112,6 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
           clearInterval(gatewayRetryTimer);
           launchJarvisSecurityAuditV1();
           launchJarvisAgentSmokeV1();
-          launchJarvisResearchCommissioningV1();
           launchJarvisAdviserMemoryCommissioningV1();
         } catch (retryErr) {
           console.warn(`[wrapper] gateway retry not ready yet: ${String(retryErr)}`);
