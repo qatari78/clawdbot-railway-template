@@ -2050,7 +2050,10 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
   await ensureJarvisLobsterV1();
 
   // Apply Jarvis operational tool/browser settings directly, avoiding slow CLI chains.
-  applyJarvisOperationalDefaults();\n\n  // OpenRouter server-tool research commissioning is gateway-independent.\n  launchJarvisResearchCommissioningV1();
+  applyJarvisOperationalDefaults();
+
+  // OpenRouter server-tool research commissioning is gateway-independent.
+  launchJarvisResearchCommissioningV1();
 
   // Optional operator hook to install/persist extra tools under /data.
   // This is intentionally best-effort and should be used to set up persistent
