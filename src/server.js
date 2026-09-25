@@ -519,17 +519,21 @@ function c1WorkspaceFileSizes(root) {
 async function runC1ContextDiagnosticV1() {
   const sessionKey = "agent:main:main";
   const outputName = "c1-context-diagnostic-v1";
+  const trajectoryWorkspace = path.join(os.tmpdir(), "c1-trajectory-workspace-v1");
   const outputDir = path.join(
-    WORKSPACE_DIR,
+    trajectoryWorkspace,
     ".openclaw",
     "trajectory-exports",
     outputName,
   );
   const workspaceFiles = c1WorkspaceFileSizes(WORKSPACE_DIR);
 
+  let stage = "prepare";
   try {
-    fs.rmSync(outputDir, { recursive: true, force: true });
-    await runCmd(
+    fs.rmSync(trajectoryWorkspace, { recursive: true, force: true });
+    fs.mkdirSync(trajectoryWorkspace, { recursive: true, mode: 0o700 });
+    stage = "export";
+    const exportResult = await runCmd(
       OPENCLAW_NODE,
       clawArgs([
         "sessions",
@@ -539,7 +543,7 @@ async function runC1ContextDiagnosticV1() {
         "--agent",
         "main",
         "--workspace",
-        WORKSPACE_DIR,
+        trajectoryWorkspace,
         "--output",
         outputName,
         "--json",
@@ -553,7 +557,19 @@ async function runC1ContextDiagnosticV1() {
         timeoutMs: 120_000,
       },
     );
+    if (exportResult.code !== 0) {
+      console.error(
+        "[c1-context-v1] failed=" +
+          JSON.stringify({
+            stage,
+            code: Number(exportResult.code ?? -1),
+            outputBytes: Buffer.byteLength(exportResult.output || "", "utf8"),
+          }),
+      );
+      return;
+    }
 
+    stage = "parse";
     const manifest = JSON.parse(fs.readFileSync(path.join(outputDir, "manifest.json"), "utf8"));
     const metadata = JSON.parse(fs.readFileSync(path.join(outputDir, "metadata.json"), "utf8"));
     const artifactsPath = path.join(outputDir, "artifacts.json");
@@ -701,10 +717,16 @@ async function runC1ContextDiagnosticV1() {
     };
 
     console.log("[c1-context-v1] " + JSON.stringify(result));
-  } catch {
-    console.error("[c1-context-v1] failed=1");
+  } catch (err) {
+    console.error(
+      "[c1-context-v1] failed=" +
+        JSON.stringify({
+          stage,
+          errorClass: err?.constructor?.name || "Error",
+        }),
+    );
   } finally {
-    try { fs.rmSync(outputDir, { recursive: true, force: true }); } catch {}
+    try { fs.rmSync(trajectoryWorkspace, { recursive: true, force: true }); } catch {}
   }
 }
 
