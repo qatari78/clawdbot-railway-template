@@ -629,235 +629,105 @@ async function runC1ContextDiagnosticV1() {
   const sessionKey = "agent:main:main";
   const outputName = "c1-context-diagnostic-v1";
   const trajectoryWorkspace = path.join(os.tmpdir(), "c1-trajectory-workspace-v1");
-  const outputDir = path.join(
-    trajectoryWorkspace,
-    ".openclaw",
-    "trajectory-exports",
-    outputName,
-  );
+  const outputDir = path.join(trajectoryWorkspace, ".openclaw", "trajectory-exports", outputName);
   let stage = "prepare";
+
+  const findContextPayload = (value, depth = 0) => {
+    if (depth > 12 || value == null) return null;
+    if (typeof value === "string") {
+      const text = value.trim();
+      if (!text || (text[0] !== "{" && text[0] !== "[")) return null;
+      try { return findContextPayload(JSON.parse(text), depth + 1); } catch { return null; }
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) { const found = findContextPayload(item, depth + 1); if (found) return found; }
+      return null;
+    }
+    if (typeof value === "object") {
+      if (value.report && typeof value.report === "object" && value.session && typeof value.session === "object") return value;
+      for (const item of Object.values(value)) { const found = findContextPayload(item, depth + 1); if (found) return found; }
+    }
+    return null;
+  };
 
   try {
     fs.rmSync(trajectoryWorkspace, { recursive: true, force: true });
     fs.mkdirSync(trajectoryWorkspace, { recursive: true, mode: 0o700 });
 
-    // Read-only transcript snapshot. No agent turn, slash command, or provider call.
     stage = "export";
     const exportResult = await runCmd(
       OPENCLAW_NODE,
-      clawArgs([
-        "sessions",
-        "export-trajectory",
-        "--session-key",
-        sessionKey,
-        "--agent",
-        "main",
-        "--workspace",
-        trajectoryWorkspace,
-        "--output",
-        outputName,
-        "--json",
-      ]),
-      {
-        env: {
-          ...process.env,
-          OPENCLAW_STATE_DIR: STATE_DIR,
-          OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
-        },
-        timeoutMs: 120_000,
-      },
+      clawArgs(["sessions","export-trajectory","--session-key",sessionKey,"--agent","main","--workspace",trajectoryWorkspace,"--output",outputName,"--json"]),
+      { env: { ...process.env, OPENCLAW_STATE_DIR: STATE_DIR, OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR }, timeoutMs: 120_000 },
     );
-    if (exportResult.code !== 0) {
-      throw new Error("trajectory export failed");
-    }
+    if (exportResult.code !== 0) throw new Error("trajectory export failed");
 
     stage = "parse-transcript";
-    const manifest = JSON.parse(
-      fs.readFileSync(path.join(outputDir, "manifest.json"), "utf8"),
-    );
     const branchPath = path.join(outputDir, "session-branch.json");
-    const branch = fs.existsSync(branchPath)
-      ? JSON.parse(fs.readFileSync(branchPath, "utf8"))
-      : {};
+    const branch = fs.existsSync(branchPath) ? JSON.parse(fs.readFileSync(branchPath, "utf8")) : {};
     const messages = c1MessageRowsFromBranch(branch);
-    const transcriptChars = messages.reduce(
-      (sum, message) => sum + c1EstimateMessageChars(message),
-      0,
-    );
+    const transcriptChars = messages.reduce((sum, message) => sum + c1EstimateMessageChars(message), 0);
 
-    stage = "build-openclaw-estimate";
-    const cfg = JSON.parse(fs.readFileSync(configPath(), "utf8"));
-    const [
-      { resolveCommandsSystemPromptBundle },
-      { buildBootstrapInjectionStats },
-      { buildSystemPromptReport },
-    ] = await Promise.all([
-      import("file:///openclaw/dist/auto-reply/reply/commands-system-prompt.js"),
-      import("file:///openclaw/dist/agents/bootstrap-budget.js"),
-      import("file:///openclaw/dist/agents/system-prompt-report.js"),
-    ]);
-
-    const mainEntry = Array.isArray(cfg?.agents?.entries)
-      ? cfg.agents.entries.find((entry) => entry?.id === "main")
-      : cfg?.agents?.entries?.main;
-    const configuredModel =
-      typeof mainEntry?.model === "string"
-        ? mainEntry.model
-        : typeof cfg?.agents?.defaults?.model === "string"
-          ? cfg.agents.defaults.model
-          : "openrouter/x-ai/grok-4.7";
-    const provider = configuredModel.includes("/")
-      ? configuredModel.split("/")[0]
-      : "openrouter";
-    const model = configuredModel.replace(/^openrouter\//u, "");
-    const reasoning =
-      mainEntry?.thinking ??
-      cfg?.agents?.defaults?.thinking ??
-      process.env.JARVIS_MAIN_THINKING ??
-      "high";
-
-    const params = {
-      cfg,
-      ctx: {
-        SessionKey: sessionKey,
-        RuntimePolicySessionKey: sessionKey,
-        ChatType: "direct",
-        Provider: "whatsapp",
-        OriginatingChannel: "whatsapp",
-        AccountId: "default",
-        AgentId: "main",
-      },
-      command: {
-        channel: "whatsapp",
-        accountId: "default",
-        senderId: "c1-readonly-diagnostic",
-      },
-      sessionKey,
-      sessionEntry: {
-        sessionId: String(manifest?.sessionId || ""),
-        chatType: "direct",
-      },
-      agentId: "main",
-      workspaceDir: WORKSPACE_DIR,
-      provider,
-      model,
-      elevated: { enabled: false, allowed: false },
-      resolvedElevatedLevel: "off",
-      resolvedReasoningLevel: reasoning,
+    stage = "context-command";
+    const commandParams = {
+      sessionKey, agentId: "main", message: "/context json", deliver: false,
+      idempotencyKey: "c1-context-" + (process.env.RAILWAY_DEPLOYMENT_ID || process.pid),
     };
+    const commandResult = await runCmd(
+      OPENCLAW_NODE,
+      clawArgs(["gateway","call","chat.send","--params",JSON.stringify(commandParams),"--expect-final","--timeout","30000","--json"]),
+      { env: { ...process.env, OPENCLAW_STATE_DIR: STATE_DIR, OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR }, timeoutMs: 45_000 },
+    );
+    if (commandResult.code !== 0) throw new Error("context command failed");
 
-    const bundle = await resolveCommandsSystemPromptBundle(params);
-    const injectedWorkspaceFiles = buildBootstrapInjectionStats({
-      bootstrapFiles: bundle.bootstrapFiles,
-      injectedFiles: bundle.injectedFiles,
-    });
-    const limits = c1ResolveBootstrapLimits();
-    const report = buildSystemPromptReport({
-      source: "estimate",
-      generatedAt: Date.now(),
-      sessionId: String(manifest?.sessionId || ""),
-      sessionKey,
-      provider,
-      model,
-      workspaceDir: WORKSPACE_DIR,
-      bootstrapMaxChars: limits.bootstrapMaxChars,
-      bootstrapTotalMaxChars: limits.bootstrapTotalMaxChars,
-      sandbox: {
-        mode: bundle.sandboxRuntime?.mode,
-        sandboxed: Boolean(bundle.sandboxRuntime?.sandboxed),
+    stage = "parse-context-command";
+    const rpcPayload = JSON.parse(commandResult.stdout || "{}");
+    const contextPayload = findContextPayload(rpcPayload);
+    if (!contextPayload) throw new Error("context payload not found");
+
+    const report = contextPayload.report;
+    const session = contextPayload.session;
+    const injectedRows = Array.isArray(report.injectedWorkspaceFiles) ? report.injectedWorkspaceFiles.map((file) => ({
+      name: String(file?.name ?? path.basename(String(file?.path ?? ""))),
+      rawChars: Number(file?.rawChars ?? 0),
+      injectedChars: Number(file?.injectedChars ?? 0),
+      tokensApprox: c1EstimateTokensFromChars(Number(file?.injectedChars ?? 0)),
+      truncated: file?.truncated === true ? 1 : 0,
+      missing: file?.missing === true ? 1 : 0,
+    })) : [];
+    const injectedCharsTotal = injectedRows.reduce((sum, row) => sum + row.injectedChars, 0);
+    const skillsChars = Number(report?.skills?.promptChars ?? 0);
+    const toolSchemaChars = Number(report?.tools?.schemaChars ?? 0);
+    const systemPromptChars = Number(report?.systemPrompt?.chars ?? 0);
+    const projectContextChars = Number(report?.systemPrompt?.projectContextChars ?? 0);
+    const currentTurnPromptChars = Number(report?.currentTurn?.promptChars ?? 0);
+    const runtimeContextChars = Number(report?.currentTurn?.runtimeContextChars ?? 0);
+    const modelOnlyPromptChars = Number(report?.currentTurn?.modelOnlyPromptChars ?? 0);
+    const setupTrackedChars = systemPromptChars + toolSchemaChars;
+    const currentTrackedChars = setupTrackedChars + currentTurnPromptChars + runtimeContextChars + modelOnlyPromptChars;
+
+    console.log("[c1-context-v1] " + JSON.stringify({
+      version: 7, commandPath: "gateway-chat-send-context-json", modelTurnSubmitted: 0,
+      source: {
+        systemPrompt: { chars: systemPromptChars, projectContextChars, tokensApprox: c1EstimateTokensFromChars(systemPromptChars) },
+        skillsPrompt: { chars: skillsChars, tokensApprox: c1EstimateTokensFromChars(skillsChars), count: Array.isArray(report?.skills?.entries) ? report.skills.entries.length : 0 },
+        toolSchemas: { chars: toolSchemaChars, tokensApprox: c1EstimateTokensFromChars(toolSchemaChars), count: Array.isArray(report?.tools?.entries) ? report.tools.entries.length : 0 },
+        injectedWorkspaceFiles: injectedRows,
+        injectedWorkspaceFilesTotal: { chars: injectedCharsTotal, tokensApprox: c1EstimateTokensFromChars(injectedCharsTotal) },
+        currentTurn: { promptChars: currentTurnPromptChars, runtimeContextChars, modelOnlyPromptChars },
+        transcript: { chars: transcriptChars, tokensApprox: c1EstimateTokensFromChars(transcriptChars), messages: messages.length },
       },
-      systemPrompt: bundle.systemPrompt,
-      injectedWorkspaceFiles,
-      skillsPrompt: bundle.skillsPrompt,
-      tools: bundle.tools,
-    });
-
-    stage = "measure";
-    const injectedRows = report.injectedWorkspaceFiles.map((file) => ({
-      name: String(file.name ?? path.basename(String(file.path ?? ""))),
-      rawChars: Number(file.rawChars ?? 0),
-      injectedChars: Number(file.injectedChars ?? 0),
-      tokensApprox: c1EstimateTokensFromChars(Number(file.injectedChars ?? 0)),
-      truncated: file.truncated === true ? 1 : 0,
-      missing: file.missing === true ? 1 : 0,
+      session: {
+        totalTokens: Number(session?.totalTokens ?? 0), inputTokens: Number(session?.inputTokens ?? 0),
+        outputTokens: Number(session?.outputTokens ?? 0), contextTokens: Number(session?.contextTokens ?? 0),
+      },
+      totals: {
+        setupTrackedChars, setupTrackedTokensApprox: c1EstimateTokensFromChars(setupTrackedChars),
+        currentTrackedChars, currentTrackedTokensApprox: c1EstimateTokensFromChars(currentTrackedChars),
+      },
     }));
-    const injectedCharsTotal = injectedRows.reduce(
-      (sum, row) => sum + row.injectedChars,
-      0,
-    );
-    const skillsChars = Number(report.skills.promptChars ?? 0);
-    const toolSchemaChars = Number(report.tools.schemaChars ?? 0);
-    const systemPromptTotalChars = Number(report.systemPrompt.chars ?? 0);
-    const projectContextChars = Number(report.systemPrompt.projectContextChars ?? 0);
-    const nonProjectContextChars = Number(report.systemPrompt.nonProjectContextChars ?? 0);
-    const projectFrameChars = Math.max(0, projectContextChars - injectedCharsTotal);
-    const systemBaseChars =
-      Math.max(0, nonProjectContextChars - skillsChars) + projectFrameChars;
-
-    const setupFloorChars =
-      systemBaseChars + skillsChars + injectedCharsTotal + toolSchemaChars;
-    const accountedChars = setupFloorChars + transcriptChars;
-
-    console.log(
-      "[c1-context-v1] " +
-        JSON.stringify({
-          version: 6,
-          readOnly: 1,
-          reportSource: "estimate",
-          limits: {
-            bootstrapMaxChars: Number(report.bootstrapMaxChars ?? 0),
-            bootstrapTotalMaxChars: Number(report.bootstrapTotalMaxChars ?? 0),
-            userBootstrapMaxChars: 4000,
-          },
-          source: {
-            systemPrompt: {
-              totalCharsRendered: systemPromptTotalChars,
-              charsExclusive: systemBaseChars,
-              tokensApprox: c1EstimateTokensFromChars(systemBaseChars),
-              projectFrameChars,
-            },
-            skillsPrompt: {
-              chars: skillsChars,
-              tokensApprox: c1EstimateTokensFromChars(skillsChars),
-              count: report.skills.entries.length,
-            },
-            toolSchemas: {
-              chars: toolSchemaChars,
-              tokensApprox: c1EstimateTokensFromChars(toolSchemaChars),
-              count: report.tools.entries.length,
-            },
-            injectedWorkspaceFiles: injectedRows,
-            injectedWorkspaceFilesTotal: {
-              chars: injectedCharsTotal,
-              tokensApprox: c1EstimateTokensFromChars(injectedCharsTotal),
-            },
-            memoryRecall: {
-              chars: 0,
-              tokensApprox: 0,
-              policySkipped: 1,
-            },
-            transcript: {
-              chars: transcriptChars,
-              tokensApprox: c1EstimateTokensFromChars(transcriptChars),
-              messages: messages.length,
-            },
-          },
-          totals: {
-            setupFloorChars,
-            setupFloorTokensApprox: c1EstimateTokensFromChars(setupFloorChars),
-            accountedChars,
-            accountedTokensApprox: c1EstimateTokensFromChars(accountedChars),
-          },
-        }),
-    );
   } catch (err) {
-    console.error(
-      "[c1-context-v1] failed=" +
-        JSON.stringify({
-          stage,
-          errorClass: err?.constructor?.name || "Error",
-        }),
-    );
+    console.error("[c1-context-v1] failed=" + JSON.stringify({ stage, errorClass: err?.constructor?.name || "Error" }));
   } finally {
     try { fs.rmSync(trajectoryWorkspace, { recursive: true, force: true }); } catch {}
   }
