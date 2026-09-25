@@ -2333,19 +2333,10 @@ function applyJarvisOperationalDefaults() {
     delete cfg.tools.allow;
     cfg.tools.profile = "coding";
     cfg.tools.loopDetection ??= {};
-    // Cost-safety: fail fast on repetitive tool patterns instead of allowing
-    // dozens of model/tool iterations to burn tokens without producing value.
+    // v2026.9.5 accepts only the master switch here; its retired tuning knobs
+    // are intentionally omitted so OpenClaw's built-in detector defaults apply.
     cfg.tools.loopDetection.enabled = true;
-    cfg.tools.loopDetection.historySize = 30;
-    cfg.tools.loopDetection.warningThreshold = 4;
-    cfg.tools.loopDetection.criticalThreshold = 8;
-    cfg.tools.loopDetection.globalCircuitBreakerThreshold = 12;
-    cfg.tools.loopDetection.detectors = {
-      ...(cfg.tools.loopDetection.detectors ?? {}),
-      genericRepeat: true,
-      knownPollNoProgress: true,
-      pingPong: true,
-    };
+    console.log("[loop-detection-v1] enabled=true retired-runtime-tuning=absent");
     if (cfg.tools.codeMode === undefined) cfg.tools.codeMode = "auto";
     // v2026.3.8 merges global tools.alsoAllow into every agent profile.
     // That turns the intentionally-empty "minimal" adviser profile into a
