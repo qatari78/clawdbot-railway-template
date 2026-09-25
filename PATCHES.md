@@ -1,7 +1,7 @@
 # OpenClaw Patch Inventory
 
-This image is built from OpenClaw **v2026.9.5** at commit
-`ec9c1a13db8938e5a3eaa51fca2e981cde2395a9`. The Docker build verifies the
+This image is built from OpenClaw **v2026.9.6** at commit
+`eb377ac59e6c9fd6c7705028034812becf00271b`. The Docker build verifies the
 checkout SHA and fails if it differs.
 
 The items below are local compatibility changes applied on top of that exact

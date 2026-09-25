@@ -23,11 +23,11 @@ WORKDIR /openclaw
 # Exact upstream pin. The release tag is human-readable; the SHA check is authoritative.
 # Do not make this configurable at deploy time: changing OpenClaw requires a reviewed source commit.
 RUN set -eux; \
-  git clone --depth 1 --branch v2026.9.5 https://github.com/openclaw/openclaw.git .; \
+  git clone --depth 1 --branch v2026.9.6 https://github.com/openclaw/openclaw.git .; \
   actual_sha="$(git rev-parse HEAD)"; \
-  expected_sha="ec9c1a13db8938e5a3eaa51fca2e981cde2395a9"; \
+  expected_sha="eb377ac59e6c9fd6c7705028034812becf00271b"; \
   test "$actual_sha" = "$expected_sha"; \
-  printf 'OpenClaw source verified: v2026.9.5 %s\n' "$actual_sha"
+  printf 'OpenClaw source verified: v2026.9.6 %s\n' "$actual_sha"
 
 # Patch: relax version requirements for packages that may reference unpublished versions.
 # Apply to all extension package.json files to handle workspace protocol (workspace:*).
