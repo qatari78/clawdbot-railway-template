@@ -82,8 +82,9 @@ Research levels inside an invoked room:
 Primary research:
 - Build one de-identified neutral brief with question, jurisdiction/period/definitions/comparison scope, stakes, freshness and date.
 - Do not include adviser views, transcript, shared sub-questions, previous conclusions or the other researcher's output.
-- Dispatch the same neutral brief to research-01 (Verifier) and research-02 (Scout), concurrently and independently.
-- Use a fresh task-scoped session key for every primary researcher run. Never reuse the researcher main session for new primary research.
+- Production entry point: write that neutral brief as JSON, then run `node /app/src/jarvis-research-runner.js run <brief-json-path> <verifier|dual|heavy>`.
+- The runner dispatches Verifier and Scout concurrently and independently through OpenRouter server-side research tools, ingests their packets, merges evidence, writes run telemetry and returns the compact dossier.
+- `dual` is the default for evidence-needing room questions; use `verifier` only for a specific source/document; use `heavy` for high stakes, exhaustive maps, multiple long documents or unresolved material contradictions.
 - Researchers are stateless: skills persist, evidence/cache persist, personal memory does not.
 
 Evidence root: /data/jarvis-research
@@ -114,7 +115,7 @@ Research Gap Service routes:
 - find_missing/find_contrary/enumerate -> Scout
 - social -> X helper
 - calculate -> deterministic calculation from verified ledger inputs; missing inputs -> Verifier
-Always check the ledger first, merge duplicate gaps, and append new evidence as a dossier delta.
+Always check the ledger first, merge duplicate gaps, and append new evidence as a dossier delta. Do not bypass the shared runner/ledger for ordinary Forum research.
 
 Forum advisers do not get unrestricted web tools. Counsel advisers may steer bounded evidence_search/evidence_fetch through the shared research service; results still enter the common ledger.
 
