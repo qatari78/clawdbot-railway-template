@@ -137,6 +137,7 @@ export function researchPaths() {
     briefs:path.join(r,"briefs"),
     packets:path.join(r,"ledger","packets"),
     merges:path.join(r,"ledger","merges"),
+    verifications:path.join(r,"ledger","verifications"),
     events:path.join(r,"ledger","events.jsonl"),
     dossiers:path.join(r,"dossiers"),
     docs:path.join(r,"cache","documents"),
@@ -146,7 +147,7 @@ export function researchPaths() {
     diagnostics:path.join(r,"diagnostics")
   };
 }
-function initDirs(){ const p=researchPaths(); [p.root,p.briefs,p.packets,p.merges,path.dirname(p.events),p.dossiers,p.docs,p.sources,p.inbox,p.runs,p.diagnostics].forEach(ensureDir); return p; }
+function initDirs(){ const p=researchPaths(); [p.root,p.briefs,p.packets,p.merges,p.verifications,path.dirname(p.events),p.dossiers,p.docs,p.sources,p.inbox,p.runs,p.diagnostics].forEach(ensureDir); return p; }
 
 export function uuidv7() {
   const b=crypto.randomBytes(16), ms=BigInt(Date.now());
@@ -434,6 +435,8 @@ export function buildResearchDossier(briefId) {
   let merged;
   const mergePath=path.join(p.merges,briefId+".json");
   try{merged=JSON.parse(fs.readFileSync(mergePath,"utf8"));}catch{merged=mergeResearchBrief(briefId);}
+  let verification=null;
+  try{verification=JSON.parse(fs.readFileSync(path.join(p.verifications,briefId+".json"),"utf8"));}catch{}
   const high=merged.claims.filter(c=>c.materiality==="high");
   const medium=merged.claims.filter(c=>c.materiality==="medium" && ["contested","corroborated","supported","qualified"].includes(c.ledger_status)).slice(0,12);
   const d={
@@ -442,6 +445,7 @@ export function buildResearchDossier(briefId) {
     source_count:merged.source_count,claim_count:merged.claim_count,contradiction_count:merged.contradiction_count,
     high_materiality_claims:high,selected_medium_claims:medium,contradictions:merged.contradictions,
     open_questions:merged.open_questions,
+    verification_summary:verification?{verification_id:verification.verification_id,source_count:verification.source_count,reachable_sources:verification.reachable_sources,unreachable_sources:verification.unreachable_sources,claims_checked:verification.claims_checked,numeric_mismatches:verification.numeric_mismatches,source_failures:verification.source_failures}:null,
     source_index:merged.sources.slice(0,30).map(s=>({source_key:s.source_key,url:s.url,title:s.title,publisher:s.publisher,source_class:s.source_class,published_at:s.published_at,found_by:s.found_by})),
     researcher_memos:merged.memos.map(m=>({researcher:m.researcher,memo:String(m.memo||"").slice(0,3500)})),
     note:"Active compact dossier. Immutable packets and full evidence remain in the ledger/cache."
@@ -458,6 +462,7 @@ export function getResearchStatus(){
     briefs:fs.readdirSync(p.briefs).filter(x=>x.endsWith(".json")).length,
     packets:fs.readdirSync(p.packets).filter(x=>x.endsWith(".json")).length,
     merges:fs.readdirSync(p.merges).filter(x=>x.endsWith(".json")).length,
+    verifications:fs.readdirSync(p.verifications).filter(x=>x.endsWith(".json")).length,
     dossiers:fs.readdirSync(p.dossiers).filter(x=>x.endsWith(".json")).length,
     cached_documents:fs.readdirSync(p.docs).length,
     cached_sources:fs.readdirSync(p.sources).filter(x=>x.endsWith(".json")).length
