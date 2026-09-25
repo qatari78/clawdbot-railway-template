@@ -625,7 +625,7 @@ function c1MessageRowsFromBranch(branch) {
     .map((entry) => entry.message);
 }
 
-async function runC1ContextDiagnosticV1() {
+async function runC1ContextDiagnosticV1(measurement = "current") {
   const sessionKey = "agent:main:main";
   const outputName = "c1-context-diagnostic-v1";
   const trajectoryWorkspace = path.join(os.tmpdir(), "c1-trajectory-workspace-v1");
@@ -932,7 +932,8 @@ async function runC1ContextDiagnosticV1() {
     console.log(
       "[c1-context-v1] " +
         JSON.stringify({
-          version: 11,
+          version: 12,
+          measurement,
           commandPath: "gateway-chat-history-message-get-context-json",
           fullMessageLookupUsed: fullMessageLookupUsed ? 1 : 0,
           modelTurnSubmitted: 0,
@@ -996,6 +997,100 @@ async function runC1ContextDiagnosticV1() {
     try {
       fs.rmSync(trajectoryWorkspace, { recursive: true, force: true });
     } catch {}
+  }
+}
+
+
+async function runC1FreshFloorV1() {
+  const sessionKey = "agent:main:main";
+  const markerPath = path.join(STATE_DIR, "c1-fresh-floor-v1.json");
+  const deploymentId = process.env.RAILWAY_DEPLOYMENT_ID || String(process.pid);
+  const baseRunId = "c1-fresh-floor-" + deploymentId;
+  const gatewayEnv = {
+    ...process.env,
+    OPENCLAW_STATE_DIR: STATE_DIR,
+    OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
+  };
+  const writeMarker = (state, extra = {}) => {
+    fs.mkdirSync(path.dirname(markerPath), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(
+      markerPath,
+      JSON.stringify({ state, deploymentId, at: new Date().toISOString(), ...extra }, null, 2) + "\n",
+      { encoding: "utf8", mode: 0o600 },
+    );
+  };
+
+  if (fs.existsSync(markerPath)) {
+    let state = "present";
+    try {
+      state = JSON.parse(fs.readFileSync(markerPath, "utf8"))?.state || state;
+    } catch {}
+    console.log("[c1-fresh-floor-v1] skipped marker=" + state);
+    return;
+  }
+
+  let stage = "marker";
+  writeMarker("started", { stage });
+
+  try {
+    stage = "reset";
+    const resetResult = await runCmd(
+      OPENCLAW_NODE,
+      clawArgs([
+        "gateway",
+        "call",
+        "sessions.reset",
+        "--params",
+        JSON.stringify({ key: sessionKey, agentId: "main", reason: "reset" }),
+        "--timeout",
+        "30000",
+        "--json",
+      ]),
+      { env: gatewayEnv, timeoutMs: 45_000 },
+    );
+    if (resetResult.code !== 0) throw new Error("session reset failed");
+    console.log("[c1-fresh-floor-v1] reset=ok");
+
+    stage = "one-line-turn";
+    const turnResult = await runCmd(
+      OPENCLAW_NODE,
+      clawArgs([
+        "gateway",
+        "call",
+        "chat.send",
+        "--params",
+        JSON.stringify({
+          sessionKey,
+          agentId: "main",
+          message: "Reply only with OK.",
+          deliver: false,
+          idempotencyKey: baseRunId + "-turn",
+        }),
+        "--expect-final",
+        "--timeout",
+        "60000",
+        "--json",
+      ]),
+      { env: gatewayEnv, timeoutMs: 75_000 },
+    );
+    if (turnResult.code !== 0) throw new Error("one-line turn failed");
+    console.log("[c1-fresh-floor-v1] one-line-turn=ok");
+
+    await sleep(750);
+    stage = "measure";
+    await runC1ContextDiagnosticV1("fresh-floor");
+
+    writeMarker("completed", { stage: "complete" });
+    console.log("[c1-fresh-floor-v1] completed");
+  } catch (err) {
+    writeMarker("failed", {
+      stage,
+      errorClass: err?.constructor?.name || "Error",
+    });
+    console.error(
+      "[c1-fresh-floor-v1] failed=" +
+        JSON.stringify({ stage, errorClass: err?.constructor?.name || "Error" }),
+    );
   }
 }
 
@@ -2844,7 +2939,8 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
       await ensureGatewayRunning();
       console.log("[wrapper] gateway ready");
       await runJarvisMainSessionRecoveryV1();
-      await runC1ContextDiagnosticV1();
+      await runC1ContextDiagnosticV1("current");
+      await runC1FreshFloorV1();
       launchOpenRouterKeyAuditV1();
       launchJarvisSecurityAuditV1();
       launchJarvisAgentSmokeV1();
@@ -2860,7 +2956,8 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
           await ensureGatewayRunning();
           console.log("[wrapper] gateway ready after retry");
           clearInterval(gatewayRetryTimer);
-          await runC1ContextDiagnosticV1();
+          await runC1ContextDiagnosticV1("current");
+          await runC1FreshFloorV1();
           launchJarvisSecurityAuditV1();
           launchJarvisAgentSmokeV1();
           launchJarvisAdviserMemoryCommissioningV1();
