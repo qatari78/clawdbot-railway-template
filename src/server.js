@@ -707,6 +707,7 @@ async function runC1ContextDiagnosticV1() {
       sessionKey,
       agentId: "main",
       limit: 50,
+      maxChars: 131072,
     };
     const historyResult = await runCmd(
       OPENCLAW_NODE,
@@ -736,18 +737,6 @@ async function runC1ContextDiagnosticV1() {
     const historyMessages = Array.isArray(historyPayload?.messages)
       ? historyPayload.messages
       : [];
-    const commandReply = historyMessages
-      .slice()
-      .reverse()
-      .find(
-        (message) =>
-          message &&
-          typeof message === "object" &&
-          message.role === "assistant" &&
-          message.idempotencyKey === runId,
-      );
-    if (!commandReply) throw new Error("context history reply missing");
-
     const collectText = (value, depth = 0) => {
       if (depth > 10 || value == null) return [];
       if (typeof value === "string") return [value];
@@ -759,15 +748,26 @@ async function runC1ContextDiagnosticV1() {
       }
       return [];
     };
-    const contextText = collectText(commandReply)
-      .map((value) => value.trim())
-      .find((value) => value.startsWith("{") && value.includes("\"report\""));
-    if (!contextText) throw new Error("context history JSON missing");
 
-    const contextPayload = JSON.parse(contextText);
-    if (!contextPayload?.report || !contextPayload?.session) {
-      throw new Error("context payload invalid");
+    let contextPayload = null;
+    for (const message of historyMessages.slice().reverse()) {
+      if (!message || typeof message !== "object" || message.role !== "assistant") {
+        continue;
+      }
+      for (const value of collectText(message)) {
+        const text = value.trim();
+        if (!text.startsWith("{")) continue;
+        try {
+          const candidate = JSON.parse(text);
+          if (candidate?.report && candidate?.session) {
+            contextPayload = candidate;
+            break;
+          }
+        } catch {}
+      }
+      if (contextPayload) break;
     }
+    if (!contextPayload) throw new Error("context history JSON missing");
 
     const report = contextPayload.report;
     const session = contextPayload.session;
@@ -803,7 +803,7 @@ async function runC1ContextDiagnosticV1() {
     console.log(
       "[c1-context-v1] " +
         JSON.stringify({
-          version: 9,
+          version: 10,
           commandPath: "gateway-chat-send-history-context-json",
           modelTurnSubmitted: 0,
           reportSource: String(report?.source ?? "unknown"),
