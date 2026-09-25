@@ -1003,6 +1003,219 @@ async function runC1ContextDiagnosticV1(measurement = "current") {
 }
 
 
+
+function b8ParseJsonLoose(output) {
+  const text = String(output || "").trim();
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {}
+  const lines = text.split(/\r?\n/u);
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i]?.trimStart() || "";
+    if (!line.startsWith("{") && !line.startsWith("[")) continue;
+    try {
+      return JSON.parse(lines.slice(i).join("\n"));
+    } catch {}
+  }
+  return null;
+}
+
+function b8CollectKeyValues(value, key, out = [], depth = 0) {
+  if (depth > 10 || value == null || out.length >= 32) return out;
+  if (Array.isArray(value)) {
+    for (const item of value) b8CollectKeyValues(item, key, out, depth + 1);
+    return out;
+  }
+  if (typeof value !== "object") return out;
+  for (const [entryKey, entryValue] of Object.entries(value)) {
+    if (entryKey === key) out.push(entryValue);
+    if (out.length >= 32) break;
+    b8CollectKeyValues(entryValue, key, out, depth + 1);
+  }
+  return out;
+}
+
+function b8CollectMemoryRows(value, out = [], depth = 0) {
+  if (depth > 10 || value == null || out.length >= 64) return out;
+  if (Array.isArray(value)) {
+    for (const item of value) b8CollectMemoryRows(item, out, depth + 1);
+    return out;
+  }
+  if (typeof value !== "object") return out;
+  const row = value;
+  if (
+    Number.isFinite(row.rssBytes) &&
+    Number.isFinite(row.heapUsedBytes)
+  ) {
+    out.push({
+      rssBytes: Number(row.rssBytes),
+      heapTotalBytes: Number(row.heapTotalBytes || 0),
+      heapUsedBytes: Number(row.heapUsedBytes),
+      externalBytes: Number(row.externalBytes || 0),
+      arrayBuffersBytes: Number(row.arrayBuffersBytes || 0),
+      workerCount: Number.isFinite(row.workerCount) ? Number(row.workerCount) : null,
+    });
+  }
+  for (const child of Object.values(row)) b8CollectMemoryRows(child, out, depth + 1);
+  return out;
+}
+
+async function runB8MemoryDiagnosticV1() {
+  const markerPath = path.join(STATE_DIR, "b8-memory-diagnostic-v1.json");
+  if (fs.existsSync(markerPath)) {
+    console.log("[b8-memory-v1] skipped marker=present");
+    return;
+  }
+
+  const env = {
+    ...process.env,
+    OPENCLAW_STATE_DIR: STATE_DIR,
+    OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
+  };
+  const runJson = async (args, timeoutMs = 45_000) => {
+    const result = await runCmd(OPENCLAW_NODE, clawArgs(args), { env, timeoutMs });
+    return {
+      code: result.code,
+      json: result.code === 0 ? b8ParseJsonLoose(result.output) : null,
+      outputChars: String(result.output || "").length,
+    };
+  };
+
+  const startedAt = new Date().toISOString();
+  try {
+    const stability = await runJson([
+      "gateway", "call", "diagnostics.stability",
+      "--params", JSON.stringify({ limit: 200 }),
+      "--timeout", "15000", "--json",
+    ], 25_000);
+
+    const browser = await runJson([
+      "browser", "--json", "status",
+    ], 30_000);
+
+    const memory = await runJson([
+      "memory", "status", "--json",
+    ], 60_000);
+
+    const gatewayStatus = await runJson([
+      "gateway", "status", "--deep", "--json", "--timeout", "10000",
+    ], 45_000);
+
+    const heap = await runJson([
+      "gateway", "call", "diagnostics.heapProfile",
+      "--params", JSON.stringify({ durationMs: 5000, samplingIntervalBytes: 32768 }),
+      "--timeout", "30000", "--json",
+    ], 40_000);
+
+    const memoryRows = b8CollectMemoryRows(stability.json);
+    const latestMemory = memoryRows.length ? memoryRows[memoryRows.length - 1] : null;
+    const rssGapBytes = latestMemory
+      ? Math.max(
+          0,
+          latestMemory.rssBytes -
+            latestMemory.heapUsedBytes -
+            latestMemory.externalBytes,
+        )
+      : null;
+
+    const uniqStrings = (values) =>
+      Array.from(
+        new Set(values.filter((value) => typeof value === "string" && value.length <= 160)),
+      ).slice(0, 16);
+
+    const providerCandidates = uniqStrings(b8CollectKeyValues(memory.json, "provider"));
+    const modelCandidates = uniqStrings(b8CollectKeyValues(memory.json, "model"));
+    const backendCandidates = uniqStrings(b8CollectKeyValues(memory.json, "backend"));
+    const browserRunning = b8CollectKeyValues(browser.json, "running").find(
+      (value) => typeof value === "boolean",
+    );
+    const browserPid = b8CollectKeyValues(browser.json, "pid").find(
+      (value) => Number.isFinite(value),
+    );
+    const browserDriver = uniqStrings(b8CollectKeyValues(browser.json, "driver"))[0] ?? null;
+    const browserProfile = uniqStrings(b8CollectKeyValues(browser.json, "profile"))[0] ?? null;
+
+    const heapRssBefore = b8CollectKeyValues(heap.json, "rssBefore").find(Number.isFinite);
+    const heapRssAfter = b8CollectKeyValues(heap.json, "rssAfter").find(Number.isFinite);
+    const heapUsedBefore = b8CollectKeyValues(heap.json, "heapUsedBefore").find(Number.isFinite);
+    const heapUsedAfter = b8CollectKeyValues(heap.json, "heapUsedAfter").find(Number.isFinite);
+    const heapTruncated = b8CollectKeyValues(heap.json, "truncated").find(
+      (value) => typeof value === "boolean",
+    );
+    const heapSummaryRows = Array.isArray(heap.json?.summary)
+      ? heap.json.summary.slice(0, 8).map((row) => ({
+          selfBytes: Number(row?.selfBytes || 0),
+          totalBytes: Number(row?.totalBytes || 0),
+          count: Number(row?.count || 0),
+          topFrame:
+            Array.isArray(row?.stack) && row.stack[0]
+              ? {
+                  functionName: String(row.stack[0]?.functionName || ""),
+                  url: String(row.stack[0]?.url || ""),
+                }
+              : null,
+        }))
+      : [];
+
+    const gatewayVersions = uniqStrings([
+      ...b8CollectKeyValues(gatewayStatus.json, "version"),
+      ...b8CollectKeyValues(gatewayStatus.json, "runtimeVersion"),
+    ]);
+
+    const result = {
+      version: 1,
+      startedAt,
+      finishedAt: new Date().toISOString(),
+      modelTurnSubmitted: 0,
+      probes: {
+        stability: { code: stability.code, outputChars: stability.outputChars },
+        browser: { code: browser.code, outputChars: browser.outputChars },
+        memory: { code: memory.code, outputChars: memory.outputChars },
+        gatewayStatus: { code: gatewayStatus.code, outputChars: gatewayStatus.outputChars },
+        heapProfile: { code: heap.code, outputChars: heap.outputChars },
+      },
+      runtimeMemory: latestMemory
+        ? {
+            ...latestMemory,
+            rssMinusHeapMinusExternalBytes: rssGapBytes,
+          }
+        : null,
+      browser: {
+        running: typeof browserRunning === "boolean" ? browserRunning : null,
+        pid: Number.isFinite(browserPid) ? Number(browserPid) : null,
+        driver: browserDriver,
+        profile: browserProfile,
+      },
+      memorySearch: {
+        providers: providerCandidates,
+        models: modelCandidates,
+        backends: backendCandidates,
+      },
+      heapProfile: {
+        rssBefore: Number.isFinite(heapRssBefore) ? Number(heapRssBefore) : null,
+        rssAfter: Number.isFinite(heapRssAfter) ? Number(heapRssAfter) : null,
+        heapUsedBefore: Number.isFinite(heapUsedBefore) ? Number(heapUsedBefore) : null,
+        heapUsedAfter: Number.isFinite(heapUsedAfter) ? Number(heapUsedAfter) : null,
+        truncated: typeof heapTruncated === "boolean" ? heapTruncated : null,
+        topSummary: heapSummaryRows,
+      },
+      gatewayVersions,
+    };
+
+    console.log("[b8-memory-v1] " + JSON.stringify(result));
+    fs.writeFileSync(markerPath, JSON.stringify(result, null, 2) + "\n", {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+  } catch (err) {
+    console.error(
+      "[b8-memory-v1] failed=" +
+        JSON.stringify({ errorClass: err?.constructor?.name || "Error" }),
+    );
+  }
+}
+
 async function runC1FreshFloorV1() {
   const sessionKey = "agent:main:main";
   const markerPath = path.join(STATE_DIR, "c1-fresh-floor-v1.json");
@@ -2972,6 +3185,7 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
       await runJarvisMainSessionRecoveryV1();
       const c1FreshReady = await runC1FreshFloorV1();
       if (c1FreshReady) await runC1ContextDiagnosticV1("current");
+      await runB8MemoryDiagnosticV1();
       launchOpenRouterKeyAuditV1();
       launchJarvisSecurityAuditV1();
       launchJarvisAgentSmokeV1();
@@ -2989,6 +3203,7 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
           clearInterval(gatewayRetryTimer);
           const c1FreshReady = await runC1FreshFloorV1();
           if (c1FreshReady) await runC1ContextDiagnosticV1("current");
+          await runB8MemoryDiagnosticV1();
           launchJarvisSecurityAuditV1();
           launchJarvisAgentSmokeV1();
           launchJarvisAdviserMemoryCommissioningV1();
