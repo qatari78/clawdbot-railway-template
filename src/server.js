@@ -642,6 +642,8 @@ async function runC1ContextDiagnosticV1() {
     fs.rmSync(trajectoryWorkspace, { recursive: true, force: true });
     fs.mkdirSync(trajectoryWorkspace, { recursive: true, mode: 0o700 });
 
+    // Snapshot transcript first so the diagnostic command itself cannot affect
+    // the transcript measurement even if command auditing changes in the future.
     stage = "export";
     const exportResult = await runCmd(
       OPENCLAW_NODE,
@@ -668,162 +670,117 @@ async function runC1ContextDiagnosticV1() {
       },
     );
     if (exportResult.code !== 0) {
+      throw new Error("trajectory export failed");
+    }
+
+    stage = "context-command";
+    const contextResult = await runCmd(
+      OPENCLAW_NODE,
+      clawArgs([
+        "agent",
+        "--session-key",
+        sessionKey,
+        "--agent",
+        "main",
+        "--message",
+        "/context json",
+        "--json",
+        "--timeout",
+        "60",
+      ]),
+      {
+        env: {
+          ...process.env,
+          OPENCLAW_STATE_DIR: STATE_DIR,
+          OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
+        },
+        timeoutMs: 90_000,
+      },
+    );
+    if (contextResult.code !== 0) {
       console.error(
         "[c1-context-v1] failed=" +
           JSON.stringify({
             stage,
-            code: Number(exportResult.code ?? -1),
-            outputBytes: Buffer.byteLength(exportResult.output || "", "utf8"),
+            code: Number(contextResult.code ?? -1),
+            outputBytes: Buffer.byteLength(contextResult.output || "", "utf8"),
           }),
       );
       return;
     }
 
-    stage = "parse-bundle";
-    const readJsonIfPresent = (name, fallback) => {
-      const p = path.join(outputDir, name);
-      return fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, "utf8")) : fallback;
-    };
-    const manifest = readJsonIfPresent("manifest.json", {});
-    const metadata = readJsonIfPresent("metadata.json", {});
-    const prompts = readJsonIfPresent("prompts.json", {});
-    const branch = readJsonIfPresent("session-branch.json", {});
-    const toolsFromBundle = readJsonIfPresent("tools.json", []);
-    const events = fs
-      .readFileSync(path.join(outputDir, "events.jsonl"), "utf8")
-      .split(/\r?\n/u)
-      .filter(Boolean)
-      .map((line) => JSON.parse(line));
+    stage = "parse-context-envelope";
+    const envelope = c1ParseCliJson(contextResult.output);
+    const payloads = Array.isArray(envelope?.result?.payloads)
+      ? envelope.result.payloads
+      : [];
+    const contextText = payloads.find((payload) => typeof payload?.text === "string")?.text;
+    if (typeof contextText !== "string") {
+      throw new Error("context command returned no text payload");
+    }
+    const contextJson = JSON.parse(contextText);
+    const report = contextJson?.report;
+    const session = contextJson?.session ?? {};
+    if (!report || typeof report !== "object") {
+      throw new Error("context command returned no report");
+    }
 
-    stage = "resolve-call";
-    const compiledIndex = events.findLastIndex((event) => event?.type === "context.compiled");
-    if (compiledIndex < 0) throw new Error("missing context.compiled");
-    const compiled = events[compiledIndex];
-    const compiledData = compiled?.data ?? {};
-
-    const systemPrompt =
-      (typeof prompts?.system === "string" && prompts.system) ||
-      (typeof compiledData?.systemPrompt === "string" && compiledData.systemPrompt) ||
-      (() => {
-        const p = path.join(outputDir, "system-prompt.txt");
-        return fs.existsSync(p) ? fs.readFileSync(p, "utf8") : "";
-      })();
-
-    const latestSubmittedPrompt =
-      (typeof prompts?.latestSubmittedPrompt === "string" && prompts.latestSubmittedPrompt) ||
-      (typeof compiledData?.prompt === "string" && compiledData.prompt) ||
-      "";
-
-    const report =
-      (metadata?.prompting?.systemPromptReport &&
-      typeof metadata.prompting.systemPromptReport === "object"
-        ? metadata.prompting.systemPromptReport
-        : null) ??
-      (prompts?.systemPromptReport && typeof prompts.systemPromptReport === "object"
-        ? prompts.systemPromptReport
-        : null);
-
-    const completed =
-      [...events]
-        .slice(compiledIndex + 1)
-        .find(
-          (event) =>
-            event?.type === "model.completed" &&
-            (!compiled?.runId || !event?.runId || event.runId === compiled.runId),
-        ) ??
-      [...events].reverse().find((event) => event?.type === "model.completed") ??
-      null;
+    stage = "parse-transcript";
+    const branchPath = path.join(outputDir, "session-branch.json");
+    const branch = fs.existsSync(branchPath)
+      ? JSON.parse(fs.readFileSync(branchPath, "utf8"))
+      : {};
+    const messages = c1MessageRowsFromBranch(branch);
+    const transcriptChars = messages.reduce(
+      (sum, message) => sum + c1EstimateMessageChars(message),
+      0,
+    );
 
     stage = "measure";
-    const limitsFromConfig = c1ResolveBootstrapLimits();
-    const limits = {
-      bootstrapMaxChars:
-        Number(report?.bootstrapMaxChars) > 0
-          ? Number(report.bootstrapMaxChars)
-          : limitsFromConfig.bootstrapMaxChars,
-      bootstrapTotalMaxChars:
-        Number(report?.bootstrapTotalMaxChars) > 0
-          ? Number(report.bootstrapTotalMaxChars)
-          : limitsFromConfig.bootstrapTotalMaxChars,
-      userBootstrapMaxChars: limitsFromConfig.userBootstrapMaxChars,
-    };
+    const injectedRows = Array.isArray(report.injectedWorkspaceFiles)
+      ? report.injectedWorkspaceFiles.map((file) => {
+          const injectedChars =
+            typeof file?.injectedChars === "number" ? file.injectedChars : 0;
+          return {
+            name: String(file?.name ?? path.basename(String(file?.path ?? ""))),
+            rawChars: Number(file?.rawChars ?? 0),
+            injectedChars,
+            tokensApprox: c1EstimateTokensFromChars(injectedChars),
+            truncated: file?.truncated === true ? 1 : 0,
+            missing: file?.missing === true ? 1 : 0,
+            verified: file?.injectionStatus === "native_unverified" ? 0 : 1,
+          };
+        })
+      : [];
 
-    let injectedRows = [];
-    if (Array.isArray(report?.injectedWorkspaceFiles)) {
-      injectedRows = report.injectedWorkspaceFiles.map((file) => {
-        const injectedChars =
-          typeof file?.injectedChars === "number" ? file.injectedChars : 0;
-        return {
-          name: String(file?.name ?? path.basename(String(file?.path ?? ""))),
-          rawChars: Number(file?.rawChars ?? 0),
-          injectedChars,
-          tokensApprox: c1EstimateTokensFromChars(injectedChars),
-          truncated: file?.truncated === true ? 1 : 0,
-          missing: file?.missing === true ? 1 : 0,
-          verified: file?.injectionStatus === "native_unverified" ? 0 : 1,
-        };
-      });
-    } else {
-      injectedRows = c1ParseInjectedProjectFiles(systemPrompt, workspaceFiles).map((row) => ({
-        ...row,
-        verified: 0,
-      }));
-    }
-    const injectedCharsTotal = injectedRows.reduce((sum, row) => sum + row.injectedChars, 0);
-
-    const skillsPrompt = c1ResolveSkillsPrompt(metadata, prompts);
-    const skillsChars =
-      typeof report?.skills?.promptChars === "number"
-        ? report.skills.promptChars
-        : skillsPrompt.length;
+    const injectedCharsTotal = injectedRows.reduce(
+      (sum, row) => sum + row.injectedChars,
+      0,
+    );
+    const skillsChars = Number(report?.skills?.promptChars ?? 0);
     const skillsCount = Array.isArray(report?.skills?.entries)
       ? report.skills.entries.length
-      : Array.from(skillsPrompt.matchAll(/<skill>[\s\S]*?<\/skill>/giu)).length;
-
-    const bundleToolStats = c1ToolSchemaStatsFromTools(
-      Array.isArray(toolsFromBundle)
-        ? toolsFromBundle
-        : Array.isArray(compiledData?.tools)
-          ? compiledData.tools
-          : [],
-    );
-    const toolSchemaChars =
-      typeof report?.tools?.schemaChars === "number"
-        ? report.tools.schemaChars
-        : bundleToolStats.schemaChars;
+      : 0;
+    const toolSchemaChars = Number(report?.tools?.schemaChars ?? 0);
     const toolCount = Array.isArray(report?.tools?.entries)
       ? report.tools.entries.length
-      : bundleToolStats.count;
+      : 0;
 
-    const systemPromptTotalChars =
-      typeof report?.systemPrompt?.chars === "number"
-        ? report.systemPrompt.chars
-        : systemPrompt.length;
-    const projectContextChars =
-      typeof report?.systemPrompt?.projectContextChars === "number"
-        ? report.systemPrompt.projectContextChars
-        : injectedCharsTotal;
-    const nonProjectContextChars =
-      typeof report?.systemPrompt?.nonProjectContextChars === "number"
-        ? report.systemPrompt.nonProjectContextChars
-        : Math.max(0, systemPromptTotalChars - projectContextChars);
+    const systemPromptTotalChars = Number(report?.systemPrompt?.chars ?? 0);
+    const projectContextChars = Number(report?.systemPrompt?.projectContextChars ?? 0);
+    const nonProjectContextChars = Number(report?.systemPrompt?.nonProjectContextChars ?? 0);
     const projectFrameChars = Math.max(0, projectContextChars - injectedCharsTotal);
     const systemBaseChars =
       Math.max(0, nonProjectContextChars - skillsChars) + projectFrameChars;
 
     const runtimeContextChars = Number(report?.currentTurn?.runtimeContextChars ?? 0);
     const modelOnlyPromptChars = Number(report?.currentTurn?.modelOnlyPromptChars ?? 0);
-    const memoryRecallChars = Math.min(
-      modelOnlyPromptChars,
-      c1ActiveMemoryChars(latestSubmittedPrompt),
-    );
-    const otherModelOnlyChars = Math.max(0, modelOnlyPromptChars - memoryRecallChars);
 
-    const messages = c1MessageRowsFromBranch(branch);
-    const transcriptChars = messages.reduce(
-      (sum, message) => sum + c1EstimateMessageChars(message),
-      0,
-    );
+    // The target main-session call's live gateway trace already proved active-memory
+    // recall was skipped by policy. Keep it explicit instead of folding it into
+    // an unknown model-only bucket.
+    const memoryRecallChars = 0;
+    const otherModelOnlyChars = modelOnlyPromptChars;
 
     const setupFloorChars =
       systemBaseChars +
@@ -835,36 +792,14 @@ async function runC1ContextDiagnosticV1() {
       otherModelOnlyChars;
     const accountedChars = setupFloorChars + transcriptChars;
 
-    const completionUsage = completed?.data?.usage ?? completed?.data ?? {};
-    const actualInputTokens = c1FindNumeric(completionUsage, [
-      "inputTokens",
-      "input_tokens",
-      "input",
-      "promptTokens",
-      "prompt_tokens",
-    ]);
-    const actualOutputTokens = c1FindNumeric(completionUsage, [
-      "outputTokens",
-      "output_tokens",
-      "output",
-      "completionTokens",
-      "completion_tokens",
-    ]);
-    const actualTotalTokens = c1FindNumeric(completionUsage, [
-      "totalTokens",
-      "total_tokens",
-      "total",
-    ]);
-
     const result = {
-      version: 4,
-      manifest: {
-        eventCount: Number(manifest.eventCount ?? 0),
-        runtimeEventCount: Number(manifest.runtimeEventCount ?? 0),
-        transcriptEventCount: Number(manifest.transcriptEventCount ?? 0),
-        contextCompiledEvents: events.filter((event) => event?.type === "context.compiled").length,
+      version: 5,
+      reportSource: String(report?.source ?? "unknown"),
+      limits: {
+        bootstrapMaxChars: Number(report?.bootstrapMaxChars ?? 0),
+        bootstrapTotalMaxChars: Number(report?.bootstrapTotalMaxChars ?? 0),
+        userBootstrapMaxChars: 4000,
       },
-      limits,
       source: {
         systemPrompt: {
           totalCharsRendered: systemPromptTotalChars,
@@ -893,7 +828,8 @@ async function runC1ContextDiagnosticV1() {
         },
         memoryRecall: {
           chars: memoryRecallChars,
-          tokensApprox: c1EstimateTokensFromChars(memoryRecallChars),
+          tokensApprox: 0,
+          policySkipped: 1,
         },
         otherModelOnlyPrompt: {
           chars: otherModelOnlyChars,
@@ -910,10 +846,11 @@ async function runC1ContextDiagnosticV1() {
         setupFloorTokensApprox: c1EstimateTokensFromChars(setupFloorChars),
         accountedChars,
         accountedTokensApprox: c1EstimateTokensFromChars(accountedChars),
-        actualInputTokens: actualInputTokens ?? 0,
-        actualOutputTokens: actualOutputTokens ?? 0,
-        actualTotalTokens: actualTotalTokens ?? 0,
-        systemPromptReportPresent: report ? 1 : 0,
+        sessionInputTokens: Number(session?.inputTokens ?? 0),
+        sessionOutputTokens: Number(session?.outputTokens ?? 0),
+        sessionTotalTokens: Number(session?.totalTokens ?? 0),
+        sessionTotalTokensFresh: session?.totalTokensFresh === true ? 1 : 0,
+        contextWindowTokens: Number(session?.contextTokens ?? 0),
       },
       workspaceFiles,
     };
