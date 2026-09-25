@@ -674,7 +674,7 @@ async function runC1ContextDiagnosticV1() {
     const commandParams = {
       sessionKey,
       agentId: "main",
-      message: "/context detail",
+      message: "/context json",
       deliver: false,
       idempotencyKey: runId,
     };
@@ -700,14 +700,14 @@ async function runC1ContextDiagnosticV1() {
         timeoutMs: 45_000,
       },
     );
-    if (commandResult.code !== 0) throw new Error("context detail command failed");
+    if (commandResult.code !== 0) throw new Error("context command failed");
 
     stage = "context-history";
     const historyParams = {
       sessionKey,
       agentId: "main",
-      limit: 30,
-      maxChars: 100000,
+      limit: 50,
+      maxChars: 131072,
     };
     const historyResult = await runCmd(
       OPENCLAW_NODE,
@@ -730,9 +730,9 @@ async function runC1ContextDiagnosticV1() {
         timeoutMs: 20_000,
       },
     );
-    if (historyResult.code !== 0) throw new Error("context detail history failed");
+    if (historyResult.code !== 0) throw new Error("context history failed");
 
-    stage = "parse-context-detail";
+    stage = "parse-context-history";
     const historyPayload = JSON.parse(historyResult.stdout || "{}");
     const historyMessages = Array.isArray(historyPayload?.messages)
       ? historyPayload.messages
@@ -748,141 +748,192 @@ async function runC1ContextDiagnosticV1() {
       }
       return [];
     };
-    let detailText = "";
-    for (const message of historyMessages.slice().reverse()) {
-      if (!message || typeof message !== "object" || message.role !== "assistant") continue;
-      const candidate = collectText(message)
-        .map((value) => value.trim())
-        .find((value) => value.startsWith("🧠 Context breakdown (detailed)"));
-      if (candidate) {
-        detailText = candidate;
-        break;
+    const parseContextPayloadFromValue = (value) => {
+      for (const candidateText of collectText(value)) {
+        const text = candidateText.trim();
+        if (!text.startsWith("{")) continue;
+        try {
+          const candidate = JSON.parse(text);
+          if (candidate?.report && candidate?.session) return candidate;
+        } catch {}
       }
-    }
-    if (!detailText) throw new Error("context detail reply missing");
-
-    const parseIntText = (value) => Number(String(value || "").replaceAll(",", ""));
-    const charsFrom = (line) => {
-      const match = String(line || "").match(/([\d,]+) chars \(~([\d,]+) tok\)/u);
-      return match ? { chars: parseIntText(match[1]), tokensApprox: parseIntText(match[2]) } : null;
+      return null;
     };
-    const lines = detailText.split(/\r?\n/u);
-    const systemLine = lines.find((line) => line.startsWith("System prompt ("));
-    const skillsLine = lines.find((line) => line.startsWith("Skills list (system prompt text):"));
-    const schemasLine = lines.find((line) => line.startsWith("Tool schemas (JSON):"));
-    const trackedLine = lines.find((line) => line.startsWith("Tracked prompt estimate:"));
-    const actualLine = lines.find((line) => line.startsWith("Actual context usage (cached):"));
-    const overheadLine = lines.find((line) => line.startsWith("Untracked provider/runtime overhead:"));
-    const totalsLine = lines.find((line) => line.startsWith("Session tokens (cached):"));
-    if (!systemLine || !skillsLine || !schemasLine || !trackedLine || !actualLine || !totalsLine) {
-      throw new Error("context detail required lines missing");
+
+    const assistantMessages = historyMessages
+      .slice()
+      .reverse()
+      .filter(
+        (message) =>
+          message &&
+          typeof message === "object" &&
+          message.role === "assistant",
+      );
+
+    let contextPayload = null;
+    let fullMessageLookupUsed = false;
+    for (const message of assistantMessages) {
+      contextPayload = parseContextPayloadFromValue(message);
+      if (contextPayload) break;
     }
 
-    const system = charsFrom(systemLine);
-    const skills = charsFrom(skillsLine);
-    const schemas = charsFrom(schemasLine);
-    const tracked = charsFrom(trackedLine);
-    if (!system || !skills || !schemas || !tracked) {
-      throw new Error("context detail numeric parse failed");
-    }
-    const projectMatch = systemLine.match(/Project Context ([\d,]+) chars \(~([\d,]+) tok\)/u);
-    const sourceMatch = systemLine.match(/^System prompt \(([^)]+)\):/u);
-    const skillsCountMatch = skillsLine.match(/\(([\d,]+) skills\)$/u);
-    const actualMatch = actualLine.match(/([\d,]+) tok/u);
-    const overheadMatch = overheadLine?.match(/~([\d,]+) tok/u);
-    const totalsMatch = totalsLine.match(/Session tokens \(cached\): ([\d,]+) total \/ ctx=([\d,?]+)/u);
-    if (!actualMatch || !totalsMatch) throw new Error("context detail token parse failed");
-
-    const injectedRows = [];
-    let inInjected = false;
-    for (const line of lines) {
-      if (line === "Injected workspace files:") {
-        inInjected = true;
-        continue;
-      }
-      if (!inInjected) continue;
-      if (!line.startsWith("- ")) {
-        if (line.startsWith("Skills list")) break;
-        continue;
-      }
-      const nameEnd = line.indexOf(": ");
-      if (nameEnd < 3) continue;
-      const name = line.slice(2, nameEnd);
-      const statusAndStats = line.slice(nameEnd + 2);
-      const status = statusAndStats.split(" | ", 1)[0];
-      const injectedMatch = statusAndStats.match(/\| injected ([\d,]+) chars \(~([\d,]+) tok\)$/u);
-      const rawMatch = statusAndStats.match(/\| raw(?:\(local\))? ([\d,]+) chars \(~([\d,]+) tok\)/u);
-      injectedRows.push({
-        name,
-        status,
-        rawChars: rawMatch ? parseIntText(rawMatch[1]) : null,
-        rawTokensApprox: rawMatch ? parseIntText(rawMatch[2]) : null,
-        injectedChars: injectedMatch ? parseIntText(injectedMatch[1]) : null,
-        tokensApprox: injectedMatch ? parseIntText(injectedMatch[2]) : null,
+    if (!contextPayload) {
+      const matchingTruncated = assistantMessages.find((message) => {
+        const meta =
+          message?.__openclaw &&
+          typeof message.__openclaw === "object" &&
+          !Array.isArray(message.__openclaw)
+            ? message.__openclaw
+            : {};
+        return (
+          typeof meta.id === "string" &&
+          meta.truncated === true &&
+          (meta.idempotencyKey === runId || meta.reason === "oversized")
+        );
       });
+      const fallbackTruncated =
+        matchingTruncated ??
+        assistantMessages.find((message) => {
+          const meta =
+            message?.__openclaw &&
+            typeof message.__openclaw === "object" &&
+            !Array.isArray(message.__openclaw)
+              ? message.__openclaw
+              : {};
+          return typeof meta.id === "string" && meta.truncated === true;
+        });
+      const messageId = fallbackTruncated?.__openclaw?.id;
+      if (typeof messageId !== "string" || !messageId) {
+        throw new Error("context history JSON missing");
+      }
+
+      stage = "context-message-get";
+      const fullMessageResult = await runCmd(
+        OPENCLAW_NODE,
+        clawArgs([
+          "gateway",
+          "call",
+          "chat.message.get",
+          "--params",
+          JSON.stringify({
+            sessionKey,
+            agentId: "main",
+            messageId,
+            maxChars: 2_000_000,
+          }),
+          "--timeout",
+          "10000",
+          "--json",
+        ]),
+        {
+          env: {
+            ...process.env,
+            OPENCLAW_STATE_DIR: STATE_DIR,
+            OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
+          },
+          timeoutMs: 20_000,
+        },
+      );
+      if (fullMessageResult.code !== 0) {
+        throw new Error("context full-message lookup failed");
+      }
+
+      stage = "parse-context-message-get";
+      const fullMessagePayload = JSON.parse(fullMessageResult.stdout || "{}");
+      if (fullMessagePayload?.ok !== true || !fullMessagePayload?.message) {
+        throw new Error("context full-message unavailable");
+      }
+      contextPayload = parseContextPayloadFromValue(fullMessagePayload.message);
+      if (!contextPayload) {
+        throw new Error("context full-message JSON missing");
+      }
+      fullMessageLookupUsed = true;
     }
-    const injectedKnown = injectedRows.filter((row) => Number.isFinite(row.injectedChars));
-    const injectedCharsTotal = injectedKnown.reduce((sum, row) => sum + row.injectedChars, 0);
-    const injectedTokensTotal = injectedKnown.reduce((sum, row) => sum + row.tokensApprox, 0);
-    const projectContextChars = projectMatch ? parseIntText(projectMatch[1]) : 0;
-    const projectContextTokensApprox = projectMatch ? parseIntText(projectMatch[2]) : 0;
-    const systemPromptChars = system.chars;
-    const systemPromptTokensApprox = system.tokensApprox;
-    const nonProjectContextChars = Math.max(0, systemPromptChars - projectContextChars);
-    const actualContextTokens = parseIntText(actualMatch[1]);
-    const cachedTotalTokens = parseIntText(totalsMatch[1]);
-    const contextWindowTokens = totalsMatch[2] === "?" ? null : parseIntText(totalsMatch[2]);
+
+    const report = contextPayload.report;
+    const session = contextPayload.session;
+    const injectedRows = Array.isArray(report.injectedWorkspaceFiles)
+      ? report.injectedWorkspaceFiles.map((file) => ({
+          name: String(file?.name ?? path.basename(String(file?.path ?? ""))),
+          path: String(file?.path ?? ""),
+          rawChars: Number(file?.rawChars ?? 0),
+          injectedChars: Number(file?.injectedChars ?? 0),
+          tokensApprox: c1EstimateTokensFromChars(Number(file?.injectedChars ?? 0)),
+          truncated: file?.truncated === true ? 1 : 0,
+          missing: file?.missing === true ? 1 : 0,
+        }))
+      : [];
+    const injectedCharsTotal = injectedRows.reduce(
+      (sum, row) => sum + row.injectedChars,
+      0,
+    );
+    const skillsChars = Number(report?.skills?.promptChars ?? 0);
+    const toolSchemaChars = Number(report?.tools?.schemaChars ?? 0);
+    const systemPromptChars = Number(report?.systemPrompt?.chars ?? 0);
+    const projectContextChars = Number(report?.systemPrompt?.projectContextChars ?? 0);
+    const nonProjectContextChars = Number(report?.systemPrompt?.nonProjectContextChars ?? 0);
+    const currentTurnPromptChars = Number(report?.currentTurn?.promptChars ?? 0);
+    const runtimeContextChars = Number(report?.currentTurn?.runtimeContextChars ?? 0);
+    const modelOnlyPromptChars = Number(report?.currentTurn?.modelOnlyPromptChars ?? 0);
+    const setupTrackedChars = systemPromptChars + toolSchemaChars;
+    const currentTrackedChars =
+      setupTrackedChars +
+      currentTurnPromptChars +
+      runtimeContextChars +
+      modelOnlyPromptChars;
 
     console.log(
       "[c1-context-v1] " +
         JSON.stringify({
           version: 11,
-          commandPath: "gateway-chat-send-history-context-detail",
+          commandPath: "gateway-chat-history-message-get-context-json",
+          fullMessageLookupUsed: fullMessageLookupUsed ? 1 : 0,
           modelTurnSubmitted: 0,
-          reportSource: sourceMatch?.[1] || "unknown",
-          diagnosticTranscriptContamination: true,
+          reportSource: String(report?.source ?? "unknown"),
           source: {
             systemPrompt: {
               chars: systemPromptChars,
-              tokensApprox: systemPromptTokensApprox,
               projectContextChars,
-              projectContextTokensApprox,
               nonProjectContextChars,
-              nonProjectContextTokensApprox: c1EstimateTokensFromChars(nonProjectContextChars),
-              note: "systemPrompt includes injected workspace files, skills prompt, and tool-list text; nested buckets are not additive",
+              tokensApprox: c1EstimateTokensFromChars(systemPromptChars),
             },
             skillsPrompt: {
-              chars: skills.chars,
-              tokensApprox: skills.tokensApprox,
-              count: skillsCountMatch ? parseIntText(skillsCountMatch[1]) : null,
+              chars: skillsChars,
+              tokensApprox: c1EstimateTokensFromChars(skillsChars),
+              count: Array.isArray(report?.skills?.entries) ? report.skills.entries.length : 0,
             },
             toolSchemas: {
-              chars: schemas.chars,
-              tokensApprox: schemas.tokensApprox,
+              chars: toolSchemaChars,
+              tokensApprox: c1EstimateTokensFromChars(toolSchemaChars),
+              count: Array.isArray(report?.tools?.entries) ? report.tools.entries.length : 0,
             },
             injectedWorkspaceFiles: injectedRows,
             injectedWorkspaceFilesTotal: {
               chars: injectedCharsTotal,
-              tokensApprox: injectedTokensTotal,
-              knownFiles: injectedKnown.length,
-              totalFiles: injectedRows.length,
+              tokensApprox: c1EstimateTokensFromChars(injectedCharsTotal),
+            },
+            currentTurn: {
+              promptChars: currentTurnPromptChars,
+              runtimeContextChars,
+              modelOnlyPromptChars,
             },
             transcript: {
               chars: transcriptChars,
               tokensApprox: c1EstimateTokensFromChars(transcriptChars),
               messages: messages.length,
-              note: "exported before this context-detail command; may include prior C1 command replies",
             },
           },
           session: {
-            actualContextTokens,
-            cachedTotalTokens,
-            contextWindowTokens,
-            untrackedProviderRuntimeOverheadTokens: overheadMatch ? parseIntText(overheadMatch[1]) : 0,
+            totalTokens: Number(session?.totalTokens ?? 0),
+            inputTokens: Number(session?.inputTokens ?? 0),
+            outputTokens: Number(session?.outputTokens ?? 0),
+            contextTokens: Number(session?.contextTokens ?? 0),
           },
           totals: {
-            trackedPromptChars: tracked.chars,
-            trackedPromptTokensApprox: tracked.tokensApprox,
+            setupTrackedChars,
+            setupTrackedTokensApprox: c1EstimateTokensFromChars(setupTrackedChars),
+            currentTrackedChars,
+            currentTrackedTokensApprox: c1EstimateTokensFromChars(currentTrackedChars),
           },
         }),
     );
