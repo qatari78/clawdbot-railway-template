@@ -21,6 +21,7 @@ import { createSafety } from "./salem-safety.js";
 import { createPeers } from "./salem-peers.js";
 import { findGatewayPids, processAlive, descendantPids } from "./salem-procs.js";
 import { createMeter } from "./salem-meter.js";
+import { createChatSizeKeeper, isOwnerChatKey } from "./salem-chat-size.js";
 import { createOwnerApprovals, isLoopbackRequest } from "./salem-approvals.js";
 
 // Migrate deprecated CLAWDBOT_* env vars → OPENCLAW_* so existing Railway deployments
@@ -225,8 +226,17 @@ function ownerWhatsAppE164() {
   } catch { return null; }
 }
 
+// R17: keep the owner's chats with Jarvis under ~60k tokens (summarised when quiet); see
+// salem-chat-size.js for the measurement behind it.
+const chatKeeper = createChatSizeKeeper({
+  gatewayCall: (method, params, timeoutMs) => gatewayCallJson(method, params, timeoutMs ?? 90_000),
+  canQuery: () => Boolean(gatewayProc) && !safety.isLatched() && !isStandby(),
+  log: console,
+});
+
 // Salem AI smart meter (C3/C4/G2): numbers from OpenClaw's usage rollups and OpenRouter.
 const meter = createMeter({
+  chatSizeLine: () => chatKeeper.line(),
   stateDir: STATE_DIR,
   workspaceDir: WORKSPACE_DIR,
   dataDir: path.dirname(STATE_DIR),
@@ -1476,6 +1486,9 @@ const ALLOWED_CONSOLE_COMMANDS = new Set([
   "research.test",
   "research.runs",
   "seat.set",
+  "session.fresh",
+  "chat.size",
+  "chat.compact",
 
   // OpenClaw CLI helpers
   "openclaw.version",
@@ -1909,6 +1922,39 @@ app.post("/setup/api/console/run", requireSetupAuth, async (req, res) => {
         }).filter(Boolean);
       } catch {}
       return res.json({ ok: true, output: JSON.stringify({ runs, recentRetryEvents: retries, events }, null, 2) + "\n" });
+    }
+    if (cmd === "session.fresh") {
+      // R17: start a fresh chat for one of the owner's chats with Jarvis — the same as the owner
+      // sending /new (or "fresh chat"). OpenClaw archives the old transcript; memory files stay.
+      // arg: "whatsapp" | "telegram" | an owner chat key (agent:main:<channel>:direct:<id> or agent:main:main).
+      let key = arg;
+      if (arg === "whatsapp") {
+        const wa = ownerWhatsAppE164();
+        key = wa ? `agent:main:whatsapp:direct:${wa}` : "";
+      } else if (arg === "telegram") {
+        key = (await chatKeeper.rows()).find((r) => r.key.startsWith("agent:main:telegram:direct:"))?.key ?? "";
+      }
+      if (!isOwnerChatKey(key)) return res.status(400).json({ ok: false, error: "usage: session.fresh whatsapp|telegram|<owner chat key>" });
+      const before = (await chatKeeper.rows()).find((r) => r.key === key) ?? null;
+      if (before?.active) return res.json({ ok: false, output: "Jarvis is working in that chat right now; try again when the run has finished.\n" });
+      const result = await gatewayCallJson("sessions.reset", { key, reason: "new" }, 60_000);
+      const after = (await chatKeeper.rows()).find((r) => r.key === key) ?? null;
+      console.log(`[chat-speed-v1] fresh chat started: ${key.replace(/\+\d{4,}/, (m) => m.slice(0, 5) + "…")} (was ${before?.totalTokens ?? "?"} tokens)`);
+      return res.json({ ok: true, output: JSON.stringify({ key, before, result, after }, null, 2) + "\n" });
+    }
+    if (cmd === "chat.size") {
+      // R17: size of the owner's chats with Jarvis (tokens re-sent on every step) and the keeper's state.
+      const rows = await chatKeeper.rows();
+      return res.json({ ok: true, output: JSON.stringify({ line: await chatKeeper.line(), rows, keeper: chatKeeper.status() }, null, 2) + "\n" });
+    }
+    if (cmd === "chat.compact") {
+      // R17: summarise one chat now (OpenClaw sessions.compact). Owner chats and test sessions only.
+      const key = arg;
+      if (!isOwnerChatKey(key) && !/^agent:main:explicit:claude-test-[a-z0-9-]{1,40}$/.test(key)) {
+        return res.status(400).json({ ok: false, error: "usage: chat.compact <owner chat key | agent:main:explicit:claude-test-…>" });
+      }
+      const r = await chatKeeper.compact(key);
+      return res.json({ ok: r.ok !== false, output: JSON.stringify(r, null, 2) + "\n" });
     }
     if (cmd === "disk.usage") {
       const r = await runCmd("bash", ["-c", "df -h / /data 2>/dev/null; echo; du -xh -d 3 /data 2>/dev/null | sort -h | tail -45"], { timeoutMs: 180_000 });
@@ -2653,6 +2699,28 @@ function applyJarvisOperationalDefaults() {
       if (mainEntry && !(Number(mainEntry.bootstrapMaxChars) >= 32_000)) mainEntry.bootstrapMaxChars = 32_000;
     }
 
+    // R17 (2026-09-26): Jarvis's chat speed.
+    // (1) "Remember across conversations" off for Jarvis only (advisers keep theirs). With it on,
+    //     Active Memory put a hidden 151-character note ("Active Memory intentionally skipped deep
+    //     recall…") in front of every WhatsApp message, sent to the model but not saved in the chat.
+    //     On the next message the saved text no longer matched what was cached, so every message
+    //     re-wrote the whole chat to the prompt cache (26 Sep: ≈268k tokens, ≈$1.35, per message).
+    //     Jarvis keeps his memory files and memory search.
+    // (2) The owner can say "fresh chat" (any capitals, at the start of a message) as well as
+    //     /new or /reset to start a fresh chat.
+    {
+      const mainEntry = cfg.agents?.entries?.main;
+      if (mainEntry) {
+        mainEntry.memory ??= {};
+        mainEntry.memory.search ??= {};
+        mainEntry.memory.search.rememberAcrossConversations = false;
+      }
+      cfg.session ??= {};
+      const triggers = Array.isArray(cfg.session.resetTriggers) ? cfg.session.resetTriggers.filter((t) => typeof t === "string" && t.trim()) : [];
+      cfg.session.resetTriggers = Array.from(new Set([...(triggers.length ? triggers : ["/new", "/reset"]), "/new", "/reset", "fresh chat"]));
+      console.log("[chat-speed-v1] " + JSON.stringify({ jarvisRememberAcrossConversations: mainEntry?.memory?.search?.rememberAcrossConversations ?? null, resetTriggers: cfg.session.resetTriggers }));
+    }
+
     cfg.tools ??= {};
     // Remove stale legacy explicit allowlists. They override profile resolution and
     // can make leaf adviser agents fail before the model is called.
@@ -3261,6 +3329,14 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
     meterRun();
     setInterval(meterRun, 60_000).unref?.();
   }, 4 * 60_000).unref?.();
+
+  // R17 chat-size keeper: every 5 min (first after 6 min) summarise an owner chat that is over
+  // ~60k tokens and has been quiet for 10 minutes (never while Jarvis is working on it).
+  const chatRun = () => { if (!isStandby()) void chatKeeper.tick(); };
+  setTimeout(() => {
+    chatRun();
+    setInterval(chatRun, 5 * 60_000).unref?.();
+  }, 6 * 60_000).unref?.();
 
   // B5: a latched (deliberate) stop survives container restarts and redeploys.
   const bootLatch = safety.latchInfo();

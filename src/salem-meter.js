@@ -274,7 +274,7 @@ export function openRouterSpend(samples, start, end) {
 
 // ---- rendering -----------------------------------------------------------------------
 
-export function renderDaily({ date, day, orCheck, mtd, balance, railway }) {
+export function renderDaily({ date, day, orCheck, mtd, balance, railway, chatSize = "" }) {
   const lines = [];
   lines.push(`📊 Salem AI meter — ${fmtDay(date)} (Qatar day)`);
   let spend = `Spend: ${money(day.totalCost)}`;
@@ -297,6 +297,8 @@ export function renderDaily({ date, day, orCheck, mtd, balance, railway }) {
   if (day.byModel.length) lines.push("By model: " + day.byModel.slice(0, 6).map((m) => `${shortModel(m.model)} ${money(m.cost)}`).join(" · "));
   if (day.latency.replies) lines.push(`Speed (Jarvis model time per reply step): avg ${secs(day.latency.avgMs)}, slowest 5% ${secs(day.latency.p95Ms)}`);
   if (Number.isFinite(day.cacheHitRate)) lines.push(`Cache: ${(day.cacheHitRate * 100).toFixed(0)}% of input served from cache`);
+  // R17: the size of Jarvis's chats with the owner now (every step re-sends the chat).
+  if (chatSize) lines.push(chatSize);
   if (day.topTasks.length && day.taskCount > 1) lines.push("Top tasks: " + day.topTasks.map((t) => `${fmtClock(t.at)} ${money(t.cost)}`).join(" · "));
   if (day.background > 0.005) lines.push(`Background (no message, e.g. nightly memory): ${money(day.background)}`);
   const flags = [];
@@ -400,7 +402,7 @@ export function renderWeekly({ startDate, endDate, week, perSeat, scout, lineup 
 
 // ---- I/O shell -----------------------------------------------------------------------
 
-export function createMeter({ stateDir, workspaceDir, dataDir = "/data", researchRunsDir = null, gatewayCall, sendWhatsApp, sendTelegram, fuseStatus, spendSamples, lineup, canQuery = () => true, log = console, fetchImpl = fetch }) {
+export function createMeter({ stateDir, workspaceDir, dataDir = "/data", researchRunsDir = null, gatewayCall, sendWhatsApp, sendTelegram, fuseStatus, spendSamples, lineup, canQuery = () => true, chatSizeLine = async () => "", log = console, fetchImpl = fetch }) {
   const statePath = path.join(stateDir, "salem-meter-state.json");
   const modelsSnapshotPath = path.join(stateDir, "salem-openrouter-models.json");
   const reportsDir = path.join(workspaceDir, "reports");
@@ -514,8 +516,10 @@ export function createMeter({ stateDir, workspaceDir, dataDir = "/data", researc
     const mtd = await monthToDate(dateStr);
     const f = fuseStatus();
     const railway = railwayEstimate(dateStr);
-    const text = renderDaily({ date: dateStr, day: d, orCheck, mtd, balance: { balance: f.balance, runwayDays: f.runwayDays, commissioning: Boolean(f.runwayCommissioning) }, railway });
-    return { text, day: d, orCheck, mtd, railway };
+    let chatSize = "";
+    try { chatSize = await chatSizeLine(); } catch (err) { log.warn?.("[meter] chat size unavailable: " + String(err).slice(0, 120)); }
+    const text = renderDaily({ date: dateStr, day: d, orCheck, mtd, balance: { balance: f.balance, runwayDays: f.runwayDays, commissioning: Boolean(f.runwayCommissioning) }, railway, chatSize });
+    return { text, day: d, orCheck, mtd, railway, chatSize };
   }
 
   async function refreshLatest() {

@@ -109,6 +109,10 @@ test("daily report text is short and complete", () => {
   assert.match(text, /Railway \(separate bill\)/);
   assert.match(text, /Railway \(separate bill\)/);
   assert.ok(text.length < 1500);
+  assert.doesNotMatch(text, /chat size/);
+  // R17: the current size of Jarvis's chats is shown when known.
+  const withSize = renderDaily({ date: DAY, day: d, orCheck: { spend: NaN }, mtd: { cost: 10, projection: 30 }, balance: { balance: 60 }, railway: {}, chatSize: "Jarvis chat size now: WhatsApp 14k tokens (summarised automatically above 60k)" });
+  assert.match(withSize, /\nJarvis chat size now: WhatsApp 14k tokens \(summarised automatically above 60k\)\n/);
 });
 
 test("scout finds price changes and new models; first run is a baseline", () => {
