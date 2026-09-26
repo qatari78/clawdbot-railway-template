@@ -231,6 +231,13 @@ function ownerWhatsAppE164() {
 const chatKeeper = createChatSizeKeeper({
   gatewayCall: (method, params, timeoutMs) => gatewayCallJson(method, params, timeoutMs ?? 90_000),
   canQuery: () => Boolean(gatewayProc) && !safety.isLatched() && !isStandby(),
+  // R17b: Jarvis's default model and thinking, read live (an owner "/model … -a" changes them).
+  jarvisDefault: () => {
+    const cfg = JSON.parse(fs.readFileSync(configPath(), "utf8"));
+    const main = cfg.agents?.entries?.main ?? {};
+    const m = main.model;
+    return { model: typeof m === "string" ? m : (m?.primary ?? null), thinking: main.thinkingDefault ?? null };
+  },
   log: console,
 });
 
