@@ -39,7 +39,7 @@ export function installJarvisRoomsV1(workspaceDir) {
 
   const skill = `---
 name: jarvis-rooms
-description: Run Jarvis Forum, Counsel, and centralized research using the installed stable backend seats.
+description: "Room commands - use this skill whenever the owner's message starts with 'Forum:' or 'Counsel:' (or asks for Forum or Counsel by name); those run the Forum or Counsel room. 'Counsel:' is the Counsel room command, never a request for Jarvis's own advice. Also covers centralized research through the research runner."
 user-invocable: false
 ---
 
