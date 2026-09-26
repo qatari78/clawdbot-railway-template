@@ -1450,6 +1450,240 @@ async function runB8MemoryDiagnosticV2() {
   }
 }
 
+
+function c2PositiveInt(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
+}
+
+function c2ModelRefFromAgent(entry) {
+  if (!entry || typeof entry !== "object") return null;
+  const raw = typeof entry.model === "string" ? entry.model : entry.model?.primary;
+  return typeof raw === "string" && raw.trim() ? raw.trim() : null;
+}
+
+function c2FindModelMetadata(value, targetRef, depth = 0, seen = new Set()) {
+  if (depth > 12 || value == null || typeof value !== "object" || seen.has(value)) return null;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = c2FindModelMetadata(item, targetRef, depth + 1, seen);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  const maxTokens = c2PositiveInt(value.maxTokens);
+  if (maxTokens !== null) {
+    const strings = [
+      value.id,
+      value.key,
+      value.model,
+      value.modelRef,
+      value.ref,
+      value.name,
+      value.provider && value.id ? String(value.provider) + "/" + String(value.id) : null,
+    ]
+      .filter((v) => typeof v === "string")
+      .map((v) => v.toLowerCase());
+    const target = String(targetRef || "").toLowerCase();
+    const targetTail = target.split("/").slice(-2).join("/");
+    if (
+      strings.some((v) => v === target || v.endsWith("/" + targetTail) || target.endsWith("/" + v))
+    ) {
+      return {
+        maxTokens,
+        contextWindow: c2PositiveInt(value.contextWindow),
+        contextTokens: c2PositiveInt(value.contextTokens),
+      };
+    }
+  }
+
+  for (const child of Object.values(value)) {
+    const found = c2FindModelMetadata(child, targetRef, depth + 1, seen);
+    if (found) return found;
+  }
+  return null;
+}
+
+async function runC2OutputEnvelopeDiagnosticV1() {
+  const markerPath = path.join(STATE_DIR, "c2-output-envelope-diagnostic-v1.json");
+  if (fs.existsSync(markerPath)) {
+    console.log("[c2-envelope-v1] skipped marker=present");
+    return;
+  }
+
+  const env = {
+    ...process.env,
+    OPENCLAW_STATE_DIR: STATE_DIR,
+    OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
+  };
+  const cutoffMs = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  const tempRoot = path.join(os.tmpdir(), "c2-output-envelope-diagnostic-v1");
+  fs.rmSync(tempRoot, { recursive: true, force: true });
+  fs.mkdirSync(tempRoot, { recursive: true, mode: 0o700 });
+
+  try {
+    const cfg = JSON.parse(fs.readFileSync(configPath(), "utf8"));
+    const configured = cfg?.agents?.entries ?? {};
+    const stats = new Map();
+
+    for (const [agentId, entry] of Object.entries(configured)) {
+      const model = c2ModelRefFromAgent(entry);
+      stats.set(agentId, {
+        agentId,
+        model,
+        active: !(agentId === "counsel-03" && process.env.JARVIS_COUNSEL_03_ACTIVE?.trim() !== "1"),
+        observedTurns: 0,
+        largestOutputTokens: 0,
+        largestAt: null,
+        largestModel: null,
+        currentEnvelope: c2PositiveInt(entry?.params?.maxTokens),
+        exportFailures: 0,
+      });
+    }
+
+    const listResult = await runCmd(
+      OPENCLAW_NODE,
+      clawArgs([
+        "sessions",
+        "--all-agents",
+        "--active",
+        "10080",
+        "--limit",
+        "all",
+        "--json",
+      ]),
+      { env, timeoutMs: 120_000 },
+    );
+    if (listResult.code !== 0) throw new Error("sessions list failed");
+    const listed = b8ParseJsonLoose(listResult.output);
+    const sessions = Array.isArray(listed?.sessions) ? listed.sessions : [];
+
+    let exportedSessions = 0;
+    for (let index = 0; index < sessions.length; index += 1) {
+      const session = sessions[index];
+      const agentId = typeof session?.agentId === "string" ? session.agentId : null;
+      const key = typeof session?.key === "string" ? session.key : null;
+      if (!agentId || !key || !stats.has(agentId)) continue;
+
+      const outputName = "session-" + index;
+      const exportResult = await runCmd(
+        OPENCLAW_NODE,
+        clawArgs([
+          "sessions",
+          "export-trajectory",
+          "--session-key",
+          key,
+          "--agent",
+          agentId,
+          "--workspace",
+          tempRoot,
+          "--output",
+          outputName,
+          "--json",
+        ]),
+        { env, timeoutMs: 90_000 },
+      );
+      if (exportResult.code !== 0) {
+        stats.get(agentId).exportFailures += 1;
+        continue;
+      }
+      exportedSessions += 1;
+
+      const branchPath = path.join(
+        tempRoot,
+        ".openclaw",
+        "trajectory-exports",
+        outputName,
+        "session-branch.json",
+      );
+      if (!fs.existsSync(branchPath)) {
+        stats.get(agentId).exportFailures += 1;
+        continue;
+      }
+      let branch;
+      try {
+        branch = JSON.parse(fs.readFileSync(branchPath, "utf8"));
+      } catch {
+        stats.get(agentId).exportFailures += 1;
+        continue;
+      }
+
+      for (const message of c1MessageRowsFromBranch(branch)) {
+        if (message?.role !== "assistant") continue;
+        const timestamp = Number(message.timestamp);
+        if (!Number.isFinite(timestamp) || timestamp < cutoffMs) continue;
+        const outputTokens = c2PositiveInt(message?.usage?.output);
+        if (outputTokens === null) continue;
+        const row = stats.get(agentId);
+        row.observedTurns += 1;
+        if (outputTokens > row.largestOutputTokens) {
+          row.largestOutputTokens = outputTokens;
+          row.largestAt = new Date(timestamp).toISOString();
+          row.largestModel =
+            typeof message.model === "string"
+              ? message.model
+              : typeof session.model === "string"
+                ? session.model
+                : row.model;
+        }
+      }
+    }
+
+    for (const row of stats.values()) {
+      if (!row.active || !row.model) continue;
+      const modelsResult = await runCmd(
+        OPENCLAW_NODE,
+        clawArgs(["models", "list", "--agent", row.agentId, "--json"]),
+        { env, timeoutMs: 60_000 },
+      );
+      const modelsJson = modelsResult.code === 0 ? b8ParseJsonLoose(modelsResult.output) : null;
+      const native = modelsJson ? c2FindModelMetadata(modelsJson, row.model) : null;
+      row.nativeMaxTokens = native?.maxTokens ?? null;
+      row.nativeContextWindow = native?.contextWindow ?? null;
+      row.effectiveContextTokens = native?.contextTokens ?? native?.contextWindow ?? null;
+
+      const formula = Math.max(32_000, row.largestOutputTokens * 2);
+      row.formulaEnvelope = formula;
+      row.candidateEnvelope =
+        row.nativeMaxTokens && row.nativeMaxTokens > 0
+          ? Math.min(formula, row.nativeMaxTokens)
+          : formula;
+      row.floorSatisfied = row.candidateEnvelope >= 32_000;
+      row.doubleObservedSatisfied =
+        row.largestOutputTokens === 0 || row.candidateEnvelope >= row.largestOutputTokens * 2;
+      row.notContextMaximum =
+        !row.effectiveContextTokens || row.candidateEnvelope !== row.effectiveContextTokens;
+      row.readyToApply =
+        row.floorSatisfied && row.doubleObservedSatisfied && row.notContextMaximum;
+    }
+
+    const result = {
+      version: 1,
+      generatedAt: new Date().toISOString(),
+      windowDays: 7,
+      cutoffAt: new Date(cutoffMs).toISOString(),
+      normalizedOutputIncludesProviderReasoning: true,
+      sessionsDiscovered: sessions.length,
+      sessionsExported: exportedSessions,
+      agents: Array.from(stats.values()),
+    };
+    console.log("[c2-envelope-v1] " + JSON.stringify(result));
+    fs.writeFileSync(markerPath, JSON.stringify(result, null, 2) + "\n", {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+  } catch (err) {
+    console.error(
+      "[c2-envelope-v1] failed=" +
+        JSON.stringify({ errorClass: err?.constructor?.name || "Error", message: String(err?.message || err).slice(0, 300) }),
+    );
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+}
+
 async function runC1FreshFloorV1() {
   const sessionKey = "agent:main:main";
   const markerPath = path.join(STATE_DIR, "c1-fresh-floor-v1.json");
@@ -3421,6 +3655,7 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
       if (c1FreshReady) await runC1ContextDiagnosticV1("current");
       await runB8MemoryDiagnosticV1();
       await runB8MemoryDiagnosticV2();
+      await runC2OutputEnvelopeDiagnosticV1();
       launchOpenRouterKeyAuditV1();
       launchJarvisSecurityAuditV1();
       launchJarvisAgentSmokeV1();
@@ -3440,6 +3675,7 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
           if (c1FreshReady) await runC1ContextDiagnosticV1("current");
           await runB8MemoryDiagnosticV1();
       await runB8MemoryDiagnosticV2();
+          await runC2OutputEnvelopeDiagnosticV1();
           launchJarvisSecurityAuditV1();
           launchJarvisAgentSmokeV1();
           launchJarvisAdviserMemoryCommissioningV1();
