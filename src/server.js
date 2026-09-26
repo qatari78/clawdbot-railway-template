@@ -1456,6 +1456,7 @@ const ALLOWED_CONSOLE_COMMANDS = new Set([
   "watchdog.reset",
   "wrapper.info",
   "cache.trace",
+  "cache.probe",
   "alert.test",
   "openclaw.gateway.call",
   "test.turn",
@@ -1604,6 +1605,40 @@ app.post("/setup/api/console/run", requireSetupAuth, async (req, res) => {
         pairs.push(pair);
       }
       return res.json({ ok: true, output: JSON.stringify({ events: events.length, stages, pairs: pairs.slice(-12) }, null, 2) + "\n" });
+    }
+    if (cmd === "cache.probe") {
+      // R9b diagnostic (≈$0.15): does OpenRouter reuse a conversation prefix for this model?
+      // "plain" mimics today's requests (no markers; a runtime-context message at the end, which
+      // changes every request). "marked" adds Anthropic-style cache_control markers on the
+      // system prompt and the latest real message, skipping the runtime-context message — the
+      // layout OpenClaw applies with compat.cacheControlFormat "anthropic".
+      const model = String(arg || "openai/gpt-6-sol").trim();
+      const nonce = crypto.randomUUID().slice(0, 8);
+      const lines = (n, tag) => Array.from({ length: n }, (_, i) => `${tag}-${nonce} line ${i}: the quick brown fox jumps over the lazy dog by the old stone bridge.`).join("\n");
+      const S = `You are a test assistant. Answer with one word.\n${lines(600, "sys")}`;
+      const U1 = `${lines(150, "u1")}\nReply with just: one`;
+      const U2 = "Reply with just: two";
+      const carrier = (i) => `[runtime context ${i} at ${new Date().toISOString()}]`;
+      const call = async (messages) => {
+        const r = await safety.openRouterRequest("/chat/completions", { method: "POST", body: { model, messages, max_tokens: 16, provider: { data_collection: "deny" }, usage: { include: true } } });
+        const u = r.json?.usage ?? {};
+        return { status: r.status, prompt: u.prompt_tokens, cached: u.prompt_tokens_details?.cached_tokens ?? null, write: u.prompt_tokens_details?.cache_write_tokens ?? null, cost: u.cost ?? null, provider: r.json?.provider ?? null, reply: String(r.json?.choices?.[0]?.message?.content ?? "").slice(0, 20), err: r.ok ? undefined : JSON.stringify(r.json ?? {}).slice(0, 300) };
+      };
+      const mark = (text) => [{ type: "text", text, cache_control: { type: "ephemeral" } }];
+      const results = {};
+      for (const variant of ["plain", "marked"]) {
+        const m = variant === "marked";
+        const tag = `${variant}-${nonce}`;
+        const sysText = `${S}\nvariant ${tag}`;
+        const sys = { role: "system", content: m ? mark(sysText) : sysText };
+        const r1 = await call([sys, { role: "user", content: m ? mark(U1) : U1 }, { role: "user", content: carrier(1) }]);
+        const a1 = { role: "assistant", content: r1.reply || "one" };
+        const r2 = await call([sys, { role: "user", content: U1 }, a1, { role: "user", content: m ? mark(U2) : U2 }, { role: "user", content: carrier(2) }]);
+        const a2 = { role: "assistant", content: r2.reply || "two" };
+        const r3 = await call([sys, { role: "user", content: U1 }, a1, { role: "user", content: U2 }, a2, { role: "user", content: m ? mark("Reply with just: three") : "Reply with just: three" }, { role: "user", content: carrier(3) }]);
+        results[variant] = { r1, r2, r3 };
+      }
+      return res.json({ ok: true, output: JSON.stringify({ model, results }, null, 2) + "\n" });
     }
     if (cmd === "wrapper.info") {
       const allGateways = findGatewayPids({ port: INTERNAL_GATEWAY_PORT });
