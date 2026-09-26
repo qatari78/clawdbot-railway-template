@@ -34,3 +34,20 @@ channel is connected.
 - `extensions/whatsapp/src/connection-controller.test.ts`
 
 Both tests must pass before the image is built.
+
+## 3. Prompt-cache markers for GPT-6 on OpenRouter
+
+**Location:** `build/patch-openrouter-gpt6-cache-markers.cjs`
+
+OpenClaw detects its Anthropic-style Chat Completions cache-control layout
+(system prompt, last tool, latest real message; runtime-context carriers
+skipped) only for `anthropic/*` models on OpenRouter. GPT-6 models on OpenRouter
+bill cache writes, and without explicit breakpoints only the system prompt was
+reused: every Jarvis call re-wrote the whole conversation (26 Sep 2026: 96% of
+the day's spend was cache writes). A direct OpenRouter test showed 99.7–99.8%
+prefix reuse with the markers, including on tools and tool results. The patch
+adds `openai/gpt-6*` on OpenRouter routes to that detection and fails the build
+if the upstream snippet changes.
+
+**Removal condition:** upstream detects cache-control markers for GPT-6 on
+OpenRouter (or OpenRouter reuses the conversation prefix without markers).

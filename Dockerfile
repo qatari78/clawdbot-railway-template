@@ -61,6 +61,12 @@ NODE
 COPY build/patch-whatsapp-cross-instance.cjs /tmp/patch-whatsapp-cross-instance.cjs
 RUN node /tmp/patch-whatsapp-cross-instance.cjs
 
+# Prompt-cache markers for GPT-6 on OpenRouter (Salem AI, 26 Sep 2026): OpenClaw applies its
+# Anthropic-style cache-control layout only to anthropic/* models on OpenRouter; GPT-6 there
+# bills cache writes and otherwise re-writes the whole conversation on every call.
+COPY build/patch-openrouter-gpt6-cache-markers.cjs /tmp/patch-openrouter-gpt6-cache-markers.cjs
+RUN node /tmp/patch-openrouter-gpt6-cache-markers.cjs
+
 # Regression gates: reproduce the managed-instance failure mode and preserve
 # connection-controller lifecycle/account scoping before building the image.
 RUN pnpm install --no-frozen-lockfile
