@@ -42,6 +42,7 @@ export function createSafety({ stateDir, configPath, log = console, fetchImpl = 
   const alertLogPath = path.join(stateDir, "jarvis-alerts.jsonl");
   const spendPath = path.join(stateDir, "jarvis-spend-history.json");
   const watchdogPath = path.join(stateDir, "jarvis-watchdog.json");
+  const fuseResetPath = path.join(stateDir, "jarvis-fuse-reset.json");
   const lastSent = new Map();
   const fuse = {
     lastCheck: null, spend60: null, usageTotal: null, usageDaily: null, usageWeekly: null,
@@ -62,6 +63,10 @@ export function createSafety({ stateDir, configPath, log = console, fetchImpl = 
   function clearLatch(by) {
     const prev = latchInfo();
     try { fs.unlinkSync(latchPath); } catch {}
+    // After the owner restarts Jarvis, the money fuse counts spend from the restart onwards;
+    // otherwise the spike that tripped it (still inside the trailing hour) would trip it again.
+    if (prev) writeJson(fuseResetPath, { at: Date.now(), by, prevReason: prev.reason });
+    fuse.tripped = false;
     log.log("[latch-v1] CLEARED " + JSON.stringify({ by, prev }));
     return prev;
   }
@@ -194,7 +199,9 @@ export function createSafety({ stateDir, configPath, log = console, fetchImpl = 
       fuse.usageTotal = Number.isFinite(usage) ? usage : null;
       fuse.usageDaily = num(keyInfo?.usage_daily, null);
       fuse.usageWeekly = num(keyInfo?.usage_weekly, null);
-      fuse.spend60 = spendInWindow(history.samples, now, HOUR);
+      const resetAt = Number(readJson(fuseResetPath, null)?.at) || 0;
+      fuse.spend60 = spendInWindow(history.samples, now, Math.min(HOUR, Math.max(0, now - resetAt)));
+      fuse.windowStart = new Date(now - Math.min(HOUR, Math.max(0, now - resetAt))).toISOString();
       if (credits && Number.isFinite(num(credits.total_credits, NaN))) {
         fuse.balance = num(credits.total_credits, 0) - num(credits.total_usage, 0);
       }
