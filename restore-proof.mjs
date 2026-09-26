@@ -92,7 +92,7 @@ async function captureLiveBackup(key) {
     ? domain.replace(/\/$/, "")
     : `http://${domain}:8080`;
 
-  const health = await fetch(`${baseUrl}/healthz`, {
+  const health = await fetch(`${baseUrl}/setup/healthz`, {
     signal: AbortSignal.timeout(10000),
   });
   if (!health.ok) throw new Error(`Primary health check failed: ${health.status}`);
