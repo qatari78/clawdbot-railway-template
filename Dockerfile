@@ -75,6 +75,8 @@ RUN pnpm ui:install && pnpm ui:build
 # Runtime image
 FROM node:24-bookworm
 ENV NODE_ENV=production
+# B8 diagnostic only: include warning registration stacks in gateway stderr.
+ENV NODE_OPTIONS="--trace-warnings"
 
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
