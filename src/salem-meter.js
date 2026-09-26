@@ -158,7 +158,10 @@ export function computeDay(result, { windowStart, windowEnd, includeTests = fals
         const n = Number(b.user) || 0;
         if (n > 0 && inWindow(t)) taskBuckets.set(t, (taskBuckets.get(t) ?? 0) + n);
       }
-      if (u.latency?.count) {
+      // OpenClaw's per-session latency also counts replies that are not model answers (e.g. a
+      // report the wrapper delivered into the chat hours after the last message); a session
+      // average above 10 minutes is not model time, so it is left out of the speed line.
+      if (u.latency?.count && Number(u.latency.avgMs) <= 10 * 60 * 1000) {
         latency.count += u.latency.count;
         latency.sumMs += u.latency.avgMs * u.latency.count;
         latency.p95Max = Number.isFinite(latency.p95Max) ? Math.max(latency.p95Max, u.latency.p95Ms) : u.latency.p95Ms;

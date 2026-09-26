@@ -142,3 +142,15 @@ test("deleted test sessions and commissioning days stay out of $/task", () => {
   const noLedger = testMatcher(null);
   assert.equal(noLedger("agent:main:bbbb-2222", row("agent:main:bbbb-2222")), false);
 });
+
+test("speed line ignores session latencies that are not model time", () => {
+  const start = qatarDayStartMs("2026-09-26");
+  const mk = (avgMs) => ({ sessions: [{ key: "agent:main:whatsapp:direct:+97400000000", agentId: "main", usage: {
+    utcQuarterHourMessageCounts: [{ date: "2026-09-26", quarterIndex: 30, user: 1 }],
+    utcQuarterHourTokenUsage: [{ date: "2026-09-26", quarterIndex: 30, totalCost: 0.01 }],
+    modelUsage: [{ model: "openai/gpt-6-sol", count: 1, totals: { totalCost: 0.01 } }],
+    latency: { count: 2, avgMs, p95Ms: avgMs * 2 },
+  } }] });
+  assert.equal(computeDay(mk(2500), { windowStart: start, windowEnd: start + 86400000 }).latency.replies, 2);
+  assert.equal(computeDay(mk(4_996_000), { windowStart: start, windowEnd: start + 86400000 }).latency.replies, 0);
+});
