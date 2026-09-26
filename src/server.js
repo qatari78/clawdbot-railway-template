@@ -1700,6 +1700,102 @@ function c2UsageSnapshot(message) {
   };
 }
 
+
+async function runC2CacheInspectV1() {
+  const markerPath = path.join(STATE_DIR, "c2-cache-inspect-v1.json");
+  if (fs.existsSync(markerPath)) {
+    console.log("[c2-cache-inspect-v1] skipped marker=present");
+    return;
+  }
+
+  const env = {
+    ...process.env,
+    OPENCLAW_STATE_DIR: STATE_DIR,
+    OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
+  };
+  const sessionKey = "agent:main:explicit:c2-cache-proof-v2";
+  const tempRoot = path.join(os.tmpdir(), "c2-cache-inspect-v1");
+  const outputName = "inspect";
+  try {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+    fs.mkdirSync(tempRoot, { recursive: true, mode: 0o700 });
+    const exported = await runCmd(
+      OPENCLAW_NODE,
+      clawArgs([
+        "sessions", "export-trajectory",
+        "--session-key", sessionKey,
+        "--agent", "main",
+        "--workspace", tempRoot,
+        "--output", outputName,
+        "--json",
+      ]),
+      { env, timeoutMs: 120_000 },
+    );
+    if (exported.code !== 0) throw new Error("trajectory export failed");
+
+    const branchPath = path.join(
+      tempRoot,
+      ".openclaw",
+      "trajectory-exports",
+      outputName,
+      "session-branch.json",
+    );
+    const branch = JSON.parse(fs.readFileSync(branchPath, "utf8"));
+    const rows = c1MessageRowsFromBranch(branch).map((message, index) => {
+      const meta =
+        message?.__openclaw && typeof message.__openclaw === "object"
+          ? message.__openclaw
+          : {};
+      const usage = c2UsageSnapshot(message);
+      return {
+        index,
+        role: typeof message?.role === "string" ? message.role : null,
+        idempotencyKey:
+          typeof message?.idempotencyKey === "string"
+            ? message.idempotencyKey
+            : typeof meta?.idempotencyKey === "string"
+              ? meta.idempotencyKey
+              : null,
+        provider: usage.provider,
+        model: usage.model,
+        input: usage.input,
+        output: usage.output,
+        cacheRead: usage.cacheRead,
+        cacheWrite: usage.cacheWrite,
+        totalTokens: usage.totalTokens,
+        costTotal: usage.costTotal,
+        stopReason: typeof message?.stopReason === "string" ? message.stopReason : null,
+      };
+    });
+    const result = {
+      version: 1,
+      generatedAt: new Date().toISOString(),
+      sessionKey,
+      modelTurns: rows.filter(
+        (row) =>
+          row.role === "assistant" &&
+          !(row.provider === "openclaw" && ["gateway-injected", "delivery-mirror"].includes(row.model)),
+      ),
+      allRows: rows,
+    };
+    console.log("[c2-cache-inspect-v1] " + JSON.stringify(result));
+    fs.writeFileSync(markerPath, JSON.stringify(result, null, 2) + "\n", {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+  } catch (err) {
+    console.error(
+      "[c2-cache-inspect-v1] failed=" +
+        JSON.stringify({
+          errorClass: err?.constructor?.name || "Error",
+          message: String(err?.message || err).slice(0, 300),
+        }),
+    );
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+}
+
 async function runC2CacheProofV2() {
   const markerPath = path.join(STATE_DIR, "c2-cache-proof-v2.json");
   if (fs.existsSync(markerPath)) {
@@ -3796,6 +3892,7 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
       await runB8MemoryDiagnosticV2();
       await runC2OutputEnvelopeDiagnosticV1();
       await runC2CacheProofV2();
+      await runC2CacheInspectV1();
       launchOpenRouterKeyAuditV1();
       launchJarvisSecurityAuditV1();
       launchJarvisAgentSmokeV1();
@@ -3817,6 +3914,7 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
       await runB8MemoryDiagnosticV2();
           await runC2OutputEnvelopeDiagnosticV1();
           await runC2CacheProofV2();
+          await runC2CacheInspectV1();
           launchJarvisSecurityAuditV1();
           launchJarvisAgentSmokeV1();
           launchJarvisAdviserMemoryCommissioningV1();
