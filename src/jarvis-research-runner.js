@@ -277,13 +277,30 @@ export async function runResearchBrief({brief,level="dual",ledgerBriefId=null}){
   const pass=failures.length===0&&packets.length===jobs.length;
   const targetBriefId=ledgerBriefId||normalized.brief_id;
   let merge=null,verification=null,semanticVerification=null,dossier=null;
+  // R12: the source and support checks are quality checks on evidence already paid for: when one
+  // fails, the dossier is still built (without that check) and the failure is reported in
+  // check_errors. 26 Sep: an empty answer from the support model ("Unexpected end of JSON input")
+  // failed a whole Counsel research run after both researchers had succeeded.
+  const checkErrors=[];
+  let checkFailedCost=0;
+  const runCheck=async(label,fn,tries)=>{
+    for(let i=1;i<=tries;i++){
+      try{return await fn();}
+      catch(err){
+        checkFailedCost+=Number(err?.cost||0);
+        if(i===tries){checkErrors.push(`${label} failed${tries>1?" twice":""}: ${String(err?.message||err).slice(0,200)}`);return null;}
+        await new Promise((r)=>setTimeout(r,3000));
+      }
+    }
+    return null;
+  };
   // R12: when one researcher of a dual/heavy run failed even after its retry, the other's evidence
   // still becomes a dossier (as a Verifier-only run would), marked partial — not thrown away.
   if(pass||packets.length>0){
     try{
       merge=mergeResearchBrief(targetBriefId);
-      verification=await verifyResearchSources(targetBriefId);
-      semanticVerification=await semanticSupportCheck(targetBriefId);
+      verification=await runCheck("source check",()=>verifyResearchSources(targetBriefId),1);
+      semanticVerification=await runCheck("support check",()=>semanticSupportCheck(targetBriefId),2);
       dossier=buildResearchDossier(targetBriefId);
     }catch(err){
       if(pass)throw err;
@@ -293,12 +310,12 @@ export async function runResearchBrief({brief,level="dual",ledgerBriefId=null}){
   }
   const partial=!pass&&Boolean(dossier);
   const researchCost=telemetry.reduce((s,x)=>s+Number(x.usage?.cost||0),0)+failedAttemptCost;
-  const supportCost=Number(semanticVerification?.usage?.cost||0);
+  const supportCost=Number(semanticVerification?.usage?.cost||0)+checkFailedCost;
   const totalCost=researchCost+supportCost;
   const summary={
     schema:"jarvis-research-run-v1.1",run_id:runId,brief_id:targetBriefId,task_brief_id:normalized.brief_id,level,
     ledger_brief_id:ledgerBriefId||null,
-    started_at:normalized.commissioned_at,finished_at:new Date().toISOString(),pass,partial,failures,
+    started_at:normalized.commissioned_at,finished_at:new Date().toISOString(),pass,partial,failures,check_errors:checkErrors,
     packets,telemetry,total_cost_usd:totalCost,failed_attempt_cost_usd:failedAttemptCost,
     merge:merge?{merge_id:merge.merge_id,source_count:merge.source_count,claim_count:merge.claim_count,contradiction_count:merge.contradiction_count}:null,
     verification:verification?{verification_id:verification.verification_id,reachable_sources:verification.reachable_sources,unreachable_sources:verification.unreachable_sources,numeric_mismatches:verification.numeric_mismatches,source_failures:verification.source_failures}:null,

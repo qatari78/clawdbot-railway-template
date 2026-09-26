@@ -110,19 +110,27 @@ async function callSupportModel({apiKey,cases}){
   };
   const controller=new AbortController();
   const timer=setTimeout(()=>controller.abort(),5*60*1000);
-  let res;
+  let res,raw="";
   try{
     res=await fetch("https://openrouter.ai/api/v1/chat/completions",{
       method:"POST",
       headers:{Authorization:`Bearer ${apiKey}`,"Content-Type":"application/json","HTTP-Referer":"https://railway.app","X-Title":"Jarvis Evidence Support"},
       body:JSON.stringify(body),signal:controller.signal
     });
+    raw=await res.text(); // R12: the time limit covers the answer too
   }finally{clearTimeout(timer);}
-  let data=null;try{data=await res.json();}catch{}
-  if(!res.ok)throw new Error(data?.error?.message||data?.message||("HTTP "+res.status));
+  let data=null;try{data=JSON.parse(raw);}catch{}
+  // R12: clear errors instead of a bare "Unexpected end of JSON input" (26 Sep: an empty answer
+  // here failed a whole Counsel research run after both researchers had succeeded).
+  const fail=(message)=>Object.assign(new Error(message),{cost:Number(data?.usage?.cost||0)});
+  if(!res.ok)throw fail(data?.error?.message||data?.message||("HTTP "+res.status));
+  if(!data||typeof data!=="object")throw fail(`OpenRouter's reply was cut off or not JSON (${raw.trim().length} bytes)`);
+  if(data.error)throw fail("provider error: "+String(data.error?.message||data.error?.code||"unknown").slice(0,200));
   const content=data?.choices?.[0]?.message?.content;
   const text=Array.isArray(content)?content.map(x=>x?.text||x?.content||"").join(""):String(content||"");
-  const parsed=JSON.parse(text);
+  if(!text.trim())throw fail(`the support model returned an empty answer (finish_reason ${data?.choices?.[0]?.finish_reason||"unknown"})`);
+  let parsed;
+  try{parsed=JSON.parse(text);}catch(err){throw fail("the support model's answer was not valid JSON ("+String(err?.message||err).slice(0,120)+")");}
   return{model:data?.model||modelSlug(model),provider:data?.provider??null,usage:data?.usage??null,results:parsed.results||[]};
 }
 

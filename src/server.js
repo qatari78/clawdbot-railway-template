@@ -1864,7 +1864,7 @@ app.post("/setup/api/console/run", requireSetupAuth, async (req, res) => {
       const parsed = parseJsonFromOutput(r.output);
       const sm = parsed?.summary;
       return res.json({ ok: r.code === 0, output: JSON.stringify(sm ? {
-        wallMs: Date.now() - t0, pass: sm.pass, failures: sm.failures, total_cost_usd: sm.total_cost_usd, failed_attempt_cost_usd: sm.failed_attempt_cost_usd ?? 0,
+        wallMs: Date.now() - t0, pass: sm.pass, partial: sm.partial ?? null, failures: sm.failures, check_errors: sm.check_errors ?? [], total_cost_usd: sm.total_cost_usd, failed_attempt_cost_usd: sm.failed_attempt_cost_usd ?? 0,
         telemetry: (sm.telemetry || []).map((x) => ({ researcher: x.researcher, model: x.model, provider: x.provider, search_engine: x.search_engine, search_requests: x.search_requests, attempts: x.attempts ?? 1, cost: x.usage?.cost })),
         merge: sm.merge, verification: sm.verification, semantic_support: sm.semantic_support,
       } : { code: r.code, head: redactSecrets(String(r.output || "")).slice(0, 1500) }, null, 2) + "\n" });
@@ -1882,7 +1882,8 @@ app.post("/setup/api/console/run", requireSetupAuth, async (req, res) => {
         const secs = (Date.parse(s.finished_at) - Date.parse(s.started_at)) / 1000;
         return {
           at: s.started_at, secs: Number.isFinite(secs) ? Math.round(secs) : null, level: s.level, gap: Boolean(s.ledger_brief_id),
-          pass: s.pass, failures: (s.failures || []).map((x) => String(x).slice(0, 240)),
+          pass: s.pass, partial: s.partial ?? null, failures: (s.failures || []).map((x) => String(x).slice(0, 240)),
+          checkErrors: (s.check_errors || []).map((x) => String(x).slice(0, 240)),
           cost: Math.round(Number(s.total_cost_usd || 0) * 1000) / 1000, failedAttemptCost: s.failed_attempt_cost_usd ?? null,
           support: s.semantic_support ? { cost: s.semantic_support.cost_usd ?? null, model: s.semantic_support.model ?? null } : null,
           researchers: (s.telemetry || []).map((x) => ({
@@ -1893,8 +1894,19 @@ app.post("/setup/api/console/run", requireSetupAuth, async (req, res) => {
         };
       });
       let retries = 0;
-      try { retries = fs.readFileSync(p.events, "utf8").split("\n").slice(-4000).filter((l) => l.includes('"research-call-retry"')).length; } catch {}
-      return res.json({ ok: true, output: JSON.stringify({ runs, recentRetryEvents: retries }, null, 2) + "\n" });
+      let events = [];
+      try {
+        const lines = fs.readFileSync(p.events, "utf8").split("\n").filter(Boolean).slice(-4000);
+        retries = lines.filter((l) => l.includes('"research-call-retry"')).length;
+        // Timeline of the last events: names, times, ids and numbers only.
+        events = lines.slice(-(n * 6)).map((l) => {
+          try {
+            const e = JSON.parse(l);
+            return { at: e.at, event: e.event, brief: String(e.brief_id || e.parent_brief_id || "").slice(-12) || undefined, level: e.level ?? e.route, pass: e.pass, cost: e.total_cost_usd ?? e.cost_usd, who: e.researcher ?? e.requested_by ?? undefined, error: e.error ? String(e.error).slice(0, 160) : undefined };
+          } catch { return null; }
+        }).filter(Boolean);
+      } catch {}
+      return res.json({ ok: true, output: JSON.stringify({ runs, recentRetryEvents: retries, events }, null, 2) + "\n" });
     }
     if (cmd === "disk.usage") {
       const r = await runCmd("bash", ["-c", "df -h / /data 2>/dev/null; echo; du -xh -d 3 /data 2>/dev/null | sort -h | tail -45"], { timeoutMs: 180_000 });
