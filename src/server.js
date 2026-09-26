@@ -370,11 +370,11 @@ async function runJarvisMainSessionRecoveryV1() {
       },
     );
     const output = redactSecrets(r.output || "").trim();
-    record = { version: 1, startedAt, finishedAt: new Date().toISOString(), ok: true, output };
+    record = { version: 2, startedAt, finishedAt: new Date().toISOString(), ok: true, output };
     console.log("[main-session-recovery-v1] reset completed " + JSON.stringify(record));
   } catch (err) {
     record = {
-      version: 1,
+      version: 2,
       startedAt,
       finishedAt: new Date().toISOString(),
       ok: false,
@@ -1164,7 +1164,7 @@ async function runB8MemoryDiagnosticV1() {
     ]);
 
     const result = {
-      version: 1,
+      version: 2,
       startedAt,
       finishedAt: new Date().toISOString(),
       modelTurnSubmitted: 0,
@@ -1660,7 +1660,7 @@ async function runC2OutputEnvelopeDiagnosticV1() {
     }
 
     const result = {
-      version: 1,
+      version: 2,
       generatedAt: new Date().toISOString(),
       windowDays: 7,
       cutoffAt: new Date(cutoffMs).toISOString(),
@@ -1700,10 +1700,10 @@ function c2UsageSnapshot(message) {
   };
 }
 
-async function runC2CacheProofV1() {
-  const markerPath = path.join(STATE_DIR, "c2-cache-proof-v1.json");
+async function runC2CacheProofV2() {
+  const markerPath = path.join(STATE_DIR, "c2-cache-proof-v2.json");
   if (fs.existsSync(markerPath)) {
-    console.log("[c2-cache-v1] skipped marker=present");
+    console.log("[c2-cache-v2] skipped marker=present");
     return;
   }
 
@@ -1712,10 +1712,10 @@ async function runC2CacheProofV1() {
     OPENCLAW_STATE_DIR: STATE_DIR,
     OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
   };
-  const sessionKey = "agent:main:explicit:c2-cache-proof-v1";
+  const sessionKey = "agent:main:explicit:c2-cache-proof-v2";
   const turns = [
-    { runId: "c2-cache-v1-turn-1", message: "Reply exactly C2-CACHE-ONE. Do not use tools." },
-    { runId: "c2-cache-v1-turn-2", message: "Reply exactly C2-CACHE-TWO. Do not use tools." },
+    { runId: "c2-cache-v2-turn-1", message: "Reply exactly C2-CACHE-ONE. Do not use tools." },
+    { runId: "c2-cache-v2-turn-2", message: "Reply exactly C2-CACHE-TWO. Do not use tools." },
   ];
   const results = [];
 
@@ -1734,7 +1734,6 @@ async function runC2CacheProofV1() {
             message: turn.message,
             thinking: "off",
             deliver: false,
-            suppressCommandInterpretation: true,
             idempotencyKey: turn.runId,
           }),
           "--expect-final",
@@ -1788,7 +1787,7 @@ async function runC2CacheProofV1() {
     }
 
     const result = {
-      version: 1,
+      version: 2,
       generatedAt: new Date().toISOString(),
       sessionKey,
       deliveredExternally: false,
@@ -1801,14 +1800,14 @@ async function runC2CacheProofV1() {
         results.every((row) => Number.isFinite(row.cacheRead)) &&
         (results[1]?.cacheRead ?? 0) > 0,
     };
-    console.log("[c2-cache-v1] " + JSON.stringify(result));
+    console.log("[c2-cache-v2] " + JSON.stringify(result));
     fs.writeFileSync(markerPath, JSON.stringify(result, null, 2) + "\n", {
       encoding: "utf8",
       mode: 0o600,
     });
   } catch (err) {
     const result = {
-      version: 1,
+      version: 2,
       generatedAt: new Date().toISOString(),
       sessionKey,
       pass: false,
@@ -1816,7 +1815,7 @@ async function runC2CacheProofV1() {
       message: String(err?.message || err).slice(0, 300),
       turns: results,
     };
-    console.error("[c2-cache-v1] failed=" + JSON.stringify(result));
+    console.error("[c2-cache-v2] failed=" + JSON.stringify(result));
     fs.writeFileSync(markerPath, JSON.stringify(result, null, 2) + "\n", {
       encoding: "utf8",
       mode: 0o600,
@@ -3796,7 +3795,7 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
       await runB8MemoryDiagnosticV1();
       await runB8MemoryDiagnosticV2();
       await runC2OutputEnvelopeDiagnosticV1();
-      await runC2CacheProofV1();
+      await runC2CacheProofV2();
       launchOpenRouterKeyAuditV1();
       launchJarvisSecurityAuditV1();
       launchJarvisAgentSmokeV1();
@@ -3817,7 +3816,7 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
           await runB8MemoryDiagnosticV1();
       await runB8MemoryDiagnosticV2();
           await runC2OutputEnvelopeDiagnosticV1();
-          await runC2CacheProofV1();
+          await runC2CacheProofV2();
           launchJarvisSecurityAuditV1();
           launchJarvisAgentSmokeV1();
           launchJarvisAdviserMemoryCommissioningV1();
