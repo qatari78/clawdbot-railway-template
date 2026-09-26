@@ -103,15 +103,15 @@ Forum runs only when the owner explicitly invokes Forum or directly addresses a 
 - Give participating Forum seats the same frozen scoped case/evidence packet.
 - Each participating seat produces an independent first-round adviser answer without seeing another seat's current-run answer.
 - Lock all first-round adviser answers before exposing any of them to another seat or publishing them as room voices.
-- Run at most one cross-review round, and only for a material contradiction/gap or an explicit owner request for debate.
+- Never start a second round automatically. A second round (debate / cross-review / "read each other") runs only when the owner commands it.
 - If the owner directly addresses a specific adviser, that adviser answers as itself; a direct single-seat question does not automatically trigger full-room synthesis.
 - Forum may recommend Counsel, but Forum/Jarvis must never invoke Counsel automatically.
 
 ### Synthesis
 
 - No Forum seat is permanently the chair, chief, or synthesizer. Seat numbers are identity/memory/channel slots only.
-- Synthesis happens only when the owner requests it or the active room instruction explicitly calls for it.
-- Treat synthesis as a separate model task. Assign it to the model/seat selected for that run by the active synthesis policy or the owner's explicit instruction; do not derive synthesis authority from seat number.
+- Synthesis happens only when the owner commands it. Never synthesize automatically.
+- Forum synthesizer: Jarvis, unless the owner names a different seat/model for that run.
 - When a room participant is used as synthesizer after also advising, use a fresh isolated synthesis context and provide the frozen case/evidence packet plus all locked submissions. Its earlier adviser answer is one peer submission, not privileged.
 - Final synthesis must preserve material disagreements and evidence uncertainty rather than manufacturing consensus.
 - The synthesizer may change from run to run without changing any permanent seat identity, memory, or Telegram binding.
@@ -126,6 +126,19 @@ Counsel requires explicit owner authorization. A recommendation to use Counsel i
 - Request only delta/deeper research that is materially needed.
 - Directly addressed Counsel seats answer as themselves. A direct question to one seat does not trigger automatic synthesis.
 - Counsel advisers do not receive unrestricted browser/web tools, recursively spawn agents, or perform operational execution. Opus/Astra may steer bounded evidence_search/evidence_fetch through the shared Research Gap Service; resulting evidence is written to the common ledger. Each permanent Counsel adviser keeps its own durable adviser memory and must not claim another adviser's private memory as its own.
+
+### Owner-defined Counsel protocol (2026-09-26) — follow exactly
+
+1. Research first. Build the dossier; commission research (Dual by default when the question needs evidence).
+2. Send every active Counsel seat the same frozen dossier + research pack. In the same message, tell each seat: "If you need more evidence before answering, reply RESEARCH NEEDED with specific questions; otherwise give your first answer."
+3. If any seat asks for research, run it through the researchers (seats never browse), then send the new evidence to ALL active Counsel seats and collect first answers. One extra research round per run unless the owner asks for more.
+4. First answers are blind: no Forum material and no other Counsel answer before a seat's own first answer is locked.
+5. After all first answers are locked, Jarvis assembles the shared bundle: each Forum member's individual answer, the Forum synthesis (if one exists), and every Counsel member's first answer. Tell the owner the bundle is ready. Do NOT start a second round.
+6. Second round only on the owner's command (e.g. "debate", "read each other", "second round"): each Counsel seat receives the shared bundle and writes its second iteration.
+7. Synthesis only on the owner's command, by the Counsel member the owner names, in a fresh isolated context with the dossier and all submissions.
+8. Jarvis's role in Counsel: read /data/workspace/reports/lineup.json. If "jarvisCounselRole" is "clerk-only" (Jarvis's model comes from a company already seated in Counsel), Jarvis only runs the steps and relays — no view, no synthesis.
+
+Wait limits (never silence): Forum seat 8 min; Counsel seat 20 min; research quick 10 min, deep 30 min. If a seat or researcher exceeds its limit, report "<seat> timed out" to the owner and continue with the others.
 
 ### Round 1 — blind independent adviser pass
 
@@ -142,7 +155,7 @@ For a substantive full-Counsel run, use every active Counsel seat unless the own
 
 Peer review happens only after all first-round answers are locked.
 
-- Run at most one cross-review round, and only for a material contradiction/gap or an explicit owner request for debate.
+- Never start cross-review automatically; it runs only on the owner's command (step 6 above).
 - When cross-review is used, a seat may receive the already-locked peer submissions only after its own independent answer exists.
 - Cross-review should identify disagreements, missed evidence, or changed conclusions; it must not erase genuine dissent merely to create consensus.
 - Do not restart broad research during peer review unless the evidence packet exposes a specific unresolved factual gap.
@@ -150,8 +163,7 @@ Peer review happens only after all first-round answers are locked.
 ### Synthesis
 
 - No Counsel seat is permanently the chair, chief, or synthesizer. Seat numbers are identity/memory/channel slots only.
-- Synthesis happens only when the owner requests it or the active Counsel instruction explicitly calls for it.
-- Treat synthesis as a separate model task. Assign it to the model/seat selected for that run by the active synthesis policy or the owner's explicit instruction; do not derive synthesis authority from seat number.
+- Synthesis happens only when the owner commands it, by the Counsel member the owner names for that run.
 - When a Counsel participant is used as synthesizer after also advising, use a fresh isolated synthesis context and provide the frozen dossier, all locked adviser submissions, and any locked cross-review notes. Its earlier adviser answer is one peer submission, not privileged.
 - Final synthesis must preserve material disagreements and evidence uncertainty rather than manufacturing consensus.
 - The synthesizer may change from run to run without changing any permanent seat identity, memory, or Telegram binding.
@@ -170,7 +182,8 @@ Peer review happens only after all first-round answers are locked.
 
 When the active surface is WhatsApp and multiple room voices are exposed:
 
-- Finish and lock all first-round adviser outputs before publishing the first adviser bubble.
+- Publish each adviser's first-round answer to the owner as soon as that adviser finishes (do not wait for the slowest seat). Seats still never see each other's answers until the owner commands a second round.
+- Take current model names for headers from /data/workspace/reports/lineup.json (configured seat models), not from memory.
 - Publish one adviser voice per WhatsApp message rather than one combined transcript.
 - Use compact headers without square brackets: \`*FORUM 1 · <MODEL>*\` or \`*COUNSEL 1 · <MODEL>*\`.
 - Optional peer-review responses get their own messages.

@@ -457,34 +457,43 @@ async function reconcileSeatSessionPinsV1() {
     clawArgs(["gateway", "call", method, "--params", JSON.stringify(params), "--json", "--timeout", "30000"]),
     { env, timeoutMs: 40_000 },
   );
+  const findRow = (obj, key, depth = 0) => {
+    if (!obj || typeof obj !== "object" || depth > 6) return null;
+    if (obj.key === key) return obj;
+    for (const v of Object.values(obj)) {
+      const r = findRow(v, key, depth + 1);
+      if (r) return r;
+    }
+    return null;
+  };
   const report = [];
   for (const id of ["main", "forum-01", "forum-02", "forum-03", "counsel-01", "counsel-02", "counsel-03", "research-01", "research-02"]) {
     const configured = cfg.agents?.entries?.[id]?.model;
     if (!configured) continue;
     const key = `agent:${id}:main`;
     try {
-      const got = await call("sessions.get", { key });
-      const row = parseJsonFromOutput(got.output);
-      if (got.code !== 0 || !row) {
-        report.push({ id, state: "unknown", code: got.code, head: redactSecrets(String(got.output || "")).slice(0, 200) });
+      const listed = await call("sessions.list", { agentId: id, limit: 500 });
+      const data = parseJsonFromOutput(listed.output);
+      if (listed.code !== 0 || !data) {
+        report.push({ id, state: "unknown", code: listed.code, head: redactSecrets(String(listed.output || "")).slice(0, 160) });
         continue;
       }
-      const model = findKeyDeep(row, "modelOverride");
-      const provider = findKeyDeep(row, "providerOverride");
-      const thinking = findKeyDeep(row, "thinkingLevel");
-      if (!model) { report.push({ id, state: "follows-seat" }); continue; }
+      const row = findRow(data, key);
+      if (!row) { report.push({ id, state: "no-room-session" }); continue; }
+      const model = row.modelOverride ?? findKeyDeep(row, "modelOverride");
+      const provider = row.providerOverride ?? findKeyDeep(row, "providerOverride");
+      const source = row.modelOverrideSource ?? findKeyDeep(row, "modelOverrideSource");
+      if (!model || source === "default") { report.push({ id, state: "follows-seat" }); continue; }
       const m = String(model);
       const pinned = provider && !m.startsWith(`${provider}/`) ? `${provider}/${m}` : m;
       if (pinned === configured) { report.push({ id, state: "pinned-to-seat-model" }); continue; }
-      const patch = { key, model: null };
-      if (thinking) patch.thinkingLevel = null;
-      const r = await call("sessions.patch", patch);
+      const r = await call("sessions.patch", { key, model: null });
       report.push({ id, state: r.code === 0 ? "cleared" : "clear-failed", pinned, configured });
     } catch (err) {
       report.push({ id, state: "error", error: redactSecrets(String(err)).slice(0, 160) });
     }
   }
-  console.log("[seat-pins-v1] " + JSON.stringify(report));
+  console.log("[seat-pins-v2] " + JSON.stringify(report));
 }
 
 function requireSetupAuth(req, res, next) {
@@ -1255,6 +1264,7 @@ const ALLOWED_CONSOLE_COMMANDS = new Set([
   "watchdog.status",
   "alert.test",
   "openclaw.gateway.call",
+  "test.turn",
 
   // OpenClaw CLI helpers
   "openclaw.version",
@@ -1314,6 +1324,24 @@ app.post("/setup/api/console/run", requireSetupAuth, async (req, res) => {
     if (cmd === "alert.test") {
       const r = await safety.sendAlert("test", arg || "TEST alert from the Salem AI safety net — no action needed.", { force: true });
       return res.json({ ok: Boolean(r.ok), output: JSON.stringify(r) + "\n" });
+    }
+    if (cmd === "test.turn") {
+      // One real agent turn in an isolated test session (agent:<id>:explicit:claude-test-<suffix>);
+      // not channel-bound, so nothing is delivered to WhatsApp/Telegram. Used for commissioning tests.
+      let spec;
+      try { spec = JSON.parse(arg || "{}"); } catch { return res.status(400).json({ ok: false, error: "arg must be JSON" }); }
+      const agentId = String(spec.agentId || "");
+      const suffix = String(spec.suffix || "");
+      const message = String(spec.message || "");
+      if (!/^(main|forum-0[1-3]|counsel-0[1-3]|research-0[12])$/.test(agentId)) return res.status(400).json({ ok: false, error: "bad agentId" });
+      if (!/^[a-z0-9-]{1,40}$/.test(suffix) || !message || message.length > 6000) return res.status(400).json({ ok: false, error: "bad suffix/message" });
+      const args = ["agent", "--agent", agentId, "--session-key", `agent:${agentId}:explicit:claude-test-${suffix}`, "--message", message, "--json", "--timeout", String(Math.min(1800, Number(spec.timeout) || 600))];
+      if (typeof spec.model === "string" && /^[a-z0-9._\/-]{3,120}$/i.test(spec.model)) args.push("--model", spec.model);
+      if (typeof spec.thinking === "string" && /^[a-z-]{2,20}$/.test(spec.thinking)) args.push("--thinking", spec.thinking);
+      const t0 = Date.now();
+      const r = await runCmd(OPENCLAW_NODE, clawArgs(args), { timeoutMs: (Math.min(1800, Number(spec.timeout) || 600) + 60) * 1000 });
+      const out = redactSecrets(r.output || "");
+      return res.status(200).json({ ok: r.code === 0, output: JSON.stringify({ code: r.code, wallMs: Date.now() - t0, output: out.length > 40_000 ? out.slice(0, 40_000) + "...(truncated)" : out }) });
     }
     if (cmd === "openclaw.gateway.call") {
       // Narrow gateway RPC access for diagnostics. Reads only, plus clearing a session model pin.
@@ -2036,12 +2064,17 @@ function applyJarvisOperationalDefaults() {
       mainEntry.tools ??= {};
       mainEntry.tools.profile = mainEntry.tools.profile ?? "coding";
       delete mainEntry.tools.allow;
+      // D2 / research design (2026-09-26): researchers do all browsing; Jarvis has no browser
+      // and no gateway (config/restart) control. Messaging, orchestration, memory and Lobster stay.
       mainEntry.tools.alsoAllow = Array.from(new Set([
-        ...(Array.isArray(mainEntry.tools.alsoAllow) ? mainEntry.tools.alsoAllow : []),
+        ...(Array.isArray(mainEntry.tools.alsoAllow) ? mainEntry.tools.alsoAllow : []).filter((t) => t !== "browser" && t !== "gateway"),
         "group:messaging",
+        "lobster",
+      ]));
+      mainEntry.tools.deny = Array.from(new Set([
+        ...(Array.isArray(mainEntry.tools.deny) ? mainEntry.tools.deny : []),
         "browser",
         "gateway",
-        "lobster",
       ]));
     }
 
@@ -2157,6 +2190,12 @@ function applyJarvisOperationalDefaults() {
 
     // Canonical user-selected model occupants/effort levels; Counsel 3 remains dormant until filled.
     applyJarvisSeatConfigV1({ cfg, stateDir: STATE_DIR, workspaceDir: WORKSPACE_DIR });
+    // Keep Jarvis's prompt small on any model: defer full tool schemas behind Code Mode.
+    const jarvisModel = cfg.agents?.entries?.main?.model;
+    if (jarvisModel) {
+      cfg.agents.defaults.models[jarvisModel] ??= {};
+      cfg.agents.defaults.models[jarvisModel].codeMode = true;
+    }
 
     // One-line, non-secret policy diagnostic for the v2026.3.8 tool resolver.
     // Safe to keep: it reports only profile/allow/alsoAllow/deny names.
@@ -2303,7 +2342,7 @@ function applyJarvisOperationalDefaults() {
           "- Treat model calls like metered utility flow: every call must produce useful work for the owner.",
           "- For stable Forum/Counsel seats, prefer sessions_send to agent:<seat-id>:main; do not sessions_spawn those seats for ordinary room turns, greetings, checks, or short advice.",
           "- Directly addressed seat: one adviser call, no automatic synthesis.",
-          "- Forum 'everyone': at most three independent adviser calls. Add one separate synthesis call only when synthesis is requested, using the model/seat selected for that run; no numbered seat has permanent synthesis authority. No research for greetings/check-ins. A second adviser round requires a material contradiction/gap or an explicit owner request.",
+          "- Forum 'everyone': at most three independent adviser calls. Synthesis (by Jarvis unless the owner names another) and any second round happen ONLY on the owner's explicit command — never automatically. No research for greetings/check-ins.",
           "- Counsel 'everyone': at most three independent seat calls. Add one separate synthesis call only when synthesis is requested, using the model/seat selected for that run; no numbered seat has permanent synthesis authority. Do not silently substitute another model for a failed named seat; report the seat unavailable unless the owner asks for a fallback.",
           "- Research: quick uses one researcher; standard uses at most two. Do not duplicate browsing across advisers. Deep follow-up is targeted to unresolved gaps only.",
           "- Never poll sessions_list or sessions_history in a loop waiting for completion. Use the supported wait/yield/completion path once.",
@@ -2317,11 +2356,13 @@ function applyJarvisOperationalDefaults() {
         fs.writeFileSync(agentsPolicyPath, agentsText, { encoding: "utf8", mode: 0o600 });
       } else {
         const oldPolicyLines = [
+          "- Forum 'everyone': at most three independent adviser calls. Add one separate synthesis call only when synthesis is requested, using the model/seat selected for that run; no numbered seat has permanent synthesis authority. No research for greetings/check-ins. A second adviser round requires a material contradiction/gap or an explicit owner request.",
           "- The standard model request envelope is 32k. Treat it as an admission/reasoning envelope, not a spend throttle; actual usage is metered from generated tokens.",
           "- Large artifacts should normally be written coherently in sections/files. Raise the per-job ceiling above 32k only when the requested deliverable genuinely benefits from one-shot generation; never restore 128k+ as the global default.",
           "- Background learning/review is off. Use Skill Workshop only on explicit owner request.",
         ];
         const newPolicyLines = [
+          "- Forum 'everyone': at most three independent adviser calls. Synthesis (by Jarvis unless the owner names another) and any second round happen ONLY on the owner's explicit command — never automatically. No research for greetings/check-ins.",
           "- Do not impose Jarvis-specific output-token ceilings. Let each provider/model use its native output and reasoning capacity.",
           "- Large artifacts may use the model/provider native capacity. Financial control belongs at the prepaid OpenRouter balance; behavioral safety comes from loop, recursion, concurrency, and tool-policy controls.",
           "- Automatic Memory Core Dreaming is enabled for permanent memory consolidation. Skill Workshop autonomous review remains off and is used only on explicit owner request.",
@@ -2338,6 +2379,32 @@ function applyJarvisOperationalDefaults() {
           console.log("[wrapper] removed stale 32k policy text from AGENTS.md");
         }
       }
+    }
+
+    // Jarvis answering policy (managed block in AGENTS.md).
+    try {
+      const agentsPath = path.join(WORKSPACE_DIR, "AGENTS.md");
+      if (fs.existsSync(agentsPath)) {
+        const begin = "<!-- jarvis-answering-policy-v1:begin -->";
+        const finish = "<!-- jarvis-answering-policy-v1:end -->";
+        const block = [
+          begin,
+          "## Jarvis Answering Policy v1",
+          "",
+          "- Plain chat: answer directly and briefly. No research or rooms for greetings, check-ins or simple questions.",
+          "- If you are not sure of a fact, say so plainly instead of guessing. Check current facts (prices, news, who holds a role, rules) through research before stating them.",
+          "- Web browsing is done by the research agents (research-01 Verifier, research-02 Scout), not by Jarvis.",
+          "- Seat models are changed only by the owner: `/model <provider/model> -a` inside that seat's chat, or `/config set agents.entries.<seat>.model=<provider/model>`. Never change seat models yourself. The current lineup is in /data/workspace/reports/lineup.json.",
+          finish,
+        ].join("\n");
+        let text = fs.readFileSync(agentsPath, "utf8");
+        const a = text.indexOf(begin);
+        const b = text.indexOf(finish);
+        const next = a >= 0 && b > a ? text.slice(0, a) + block + text.slice(b + finish.length) : text.trimEnd() + "\n\n" + block + "\n";
+        if (next !== text) fs.writeFileSync(agentsPath, next, { encoding: "utf8", mode: 0o600 });
+      }
+    } catch (err) {
+      console.warn(`[answering-policy-v1] failed: ${String(err)}`);
     }
 
     fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
@@ -2486,7 +2553,7 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
       await ensureGatewayRunning();
       console.log("[wrapper] gateway ready");
       await runJarvisMainSessionRecoveryV1();
-      void reconcileSeatSessionPinsV1().catch((err) => console.warn(`[seat-pins-v1] failed: ${String(err)}`));
+      void reconcileSeatSessionPinsV1().catch((err) => console.warn(`[seat-pins-v2] failed: ${String(err)}`));
       launchOpenRouterKeyAuditV1();
       launchJarvisSecurityAuditV1();
       launchJarvisAgentSmokeV1();
