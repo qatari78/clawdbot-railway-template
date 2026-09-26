@@ -154,3 +154,9 @@ test("speed line ignores session latencies that are not model time", () => {
   assert.equal(computeDay(mk(2500), { windowStart: start, windowEnd: start + 86400000 }).latency.replies, 2);
   assert.equal(computeDay(mk(4_996_000), { windowStart: start, windowEnd: start + 86400000 }).latency.replies, 0);
 });
+
+test("R13: the daily report shows no days estimate in a commissioning week", () => {
+  const base = { date: DAY, day: computeDay({ sessions: [], date: DAY }), orCheck: { spend: NaN }, mtd: { cost: 10, projection: 30 }, railway: {} };
+  assert.match(renderDaily({ ...base, balance: { balance: 18.5, runwayDays: 1.5, commissioning: true } }), /OpenRouter balance: \$18\.5 \(no days estimate this week: its spend includes the commissioning tests\)/);
+  assert.match(renderDaily({ ...base, balance: { balance: 18.5, runwayDays: 21.4 } }), /OpenRouter balance: \$18\.5 \(~21 days at this week's rate\)/);
+});

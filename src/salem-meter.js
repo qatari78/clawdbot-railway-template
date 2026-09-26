@@ -267,7 +267,10 @@ export function renderDaily({ date, day, orCheck, mtd, balance, railway }) {
     lines.push(`Railway (separate bill): ≈ ${money(railway.perDay)} that day, ≈ ${money(railway.perDay * 30)}/month at this rate — estimate from the container's own use (${railway.memGb.toFixed(1)} GB memory, ${Number.isFinite(railway.vcpu) ? railway.vcpu.toFixed(2) : "?"} vCPU, ${Number.isFinite(railway.diskGb) ? railway.diskGb.toFixed(0) : "?"} GB disk) at Railway's list prices; exact bill: Railway → Usage`);
   }
   if (Number.isFinite(balance?.balance)) {
-    lines.push(`OpenRouter balance: ${money(balance.balance)}${Number.isFinite(balance.runwayDays) ? ` (~${balance.runwayDays.toFixed(0)} days at this week's rate)` : ""}`);
+    const runway = balance.commissioning
+      ? " (no days estimate this week: its spend includes the commissioning tests)"
+      : Number.isFinite(balance.runwayDays) ? ` (~${balance.runwayDays.toFixed(0)} days at this week's rate)` : "";
+    lines.push(`OpenRouter balance: ${money(balance.balance)}${runway}`);
   }
   return lines.join("\n");
 }
@@ -444,7 +447,7 @@ export function createMeter({ stateDir, workspaceDir, dataDir = "/data", gateway
     const mtd = await monthToDate(dateStr);
     const f = fuseStatus();
     const railway = railwayEstimate(dateStr);
-    const text = renderDaily({ date: dateStr, day: d, orCheck, mtd, balance: { balance: f.balance, runwayDays: f.runwayDays }, railway });
+    const text = renderDaily({ date: dateStr, day: d, orCheck, mtd, balance: { balance: f.balance, runwayDays: f.runwayDays, commissioning: Boolean(f.runwayCommissioning) }, railway });
     return { text, day: d, orCheck, mtd, railway };
   }
 

@@ -37,6 +37,17 @@ export function spendInWindow(samples, now, windowMs) {
   return Math.max(0, latest.usage - base.usage);
 }
 
+// R13: is a commissioning day (Qatar date, marked in the meter's test ledger) inside the current
+// UTC week (Monday–Sunday) — the window of OpenRouter's usage_weekly, which the runway estimate
+// uses? Then that estimate reflects test spend, not normal use.
+export function commissioningWeek(testDays, now) {
+  const d = new Date(now);
+  const monday = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - ((d.getUTCDay() + 6) % 7));
+  const start = new Date(monday).toISOString().slice(0, 10);
+  const end = new Date(monday + 6 * 24 * HOUR).toISOString().slice(0, 10);
+  return (Array.isArray(testDays) ? testDays : []).some((day) => typeof day === "string" && day >= start && day <= end);
+}
+
 export function createSafety({ stateDir, configPath, log = console, fetchImpl = fetch, keyResolver = null }) {
   const latchPath = path.join(stateDir, "jarvis-stop-latch.json");
   const alertLogPath = path.join(stateDir, "jarvis-alerts.jsonl");
@@ -49,8 +60,9 @@ export function createSafety({ stateDir, configPath, log = console, fetchImpl = 
   const lastSent = new Map();
   const fuse = {
     lastCheck: null, spend60: null, usageTotal: null, usageDaily: null, usageWeekly: null,
-    balance: null, runwayDays: null, tripped: false, lastError: null,
+    balance: null, runwayDays: null, runwayCommissioning: false, tripped: false, lastError: null,
   };
+  const testLedgerPath = path.join(stateDir, "meter-test-sessions.json");
   let cachedKey = null;
   let cachedKeyAt = 0;
 
@@ -212,6 +224,9 @@ export function createSafety({ stateDir, configPath, log = console, fetchImpl = 
       }
       const dailyAvg = fuse.usageWeekly != null ? fuse.usageWeekly / 7 : null;
       fuse.runwayDays = fuse.balance != null && dailyAvg && dailyAvg > 0 ? fuse.balance / dailyAvg : null;
+      // R13: in a week with commissioning tests the runway estimate is driven by test spend, so the
+      // low-runway alert waits for the next week; the low-balance alert (< $10) stays on.
+      fuse.runwayCommissioning = commissioningWeek(readJson(testLedgerPath, null)?.days, now);
 
       const alreadyStopped = !t.dryRun && latchInfo()?.reason === "money-fuse";
       if (fuse.spend60 > t.stopPerHour && alreadyStopped) {
@@ -231,7 +246,7 @@ export function createSafety({ stateDir, configPath, log = console, fetchImpl = 
       }
       if (fuse.balance != null && fuse.balance < t.lowBalance) {
         await sendAlert("low-balance", `OpenRouter balance is low: $${fuse.balance.toFixed(2)} left. Top up to keep Jarvis running.`, { dedupeMs: 12 * HOUR });
-      } else if (fuse.runwayDays != null && fuse.runwayDays < t.runwayDays) {
+      } else if (fuse.runwayDays != null && fuse.runwayDays < t.runwayDays && !fuse.runwayCommissioning) {
         await sendAlert("low-runway", `OpenRouter balance $${fuse.balance.toFixed(2)} covers about ${fuse.runwayDays.toFixed(1)} days at this week's spend rate.`, { dedupeMs: 12 * HOUR });
       }
       log.log("[fuse-v1] " + JSON.stringify({ ...fuse, thresholds: t }));

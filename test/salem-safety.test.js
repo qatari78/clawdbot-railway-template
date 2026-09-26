@@ -55,3 +55,31 @@ test("the fuse alerts once per stop, not every check", async () => {
   await safety.fuseTick({ stopGateway: async () => {} });
   assert.equal(sent.filter((t) => t.includes("MONEY FUSE")).length, 1);
 });
+
+test("R13: a commissioning day in the current UTC week pauses the runway estimate's alert", async () => {
+  const { commissioningWeek } = await import("../src/salem-safety.js");
+  const sat = Date.parse("2026-09-26T12:00:00Z");
+  assert.equal(commissioningWeek(["2026-09-26"], sat), true);
+  assert.equal(commissioningWeek(["2026-09-21"], sat), true);   // Monday of the same week
+  assert.equal(commissioningWeek(["2026-09-20"], sat), false);  // previous week
+  assert.equal(commissioningWeek(["2026-09-26"], Date.parse("2026-09-28T01:00:00Z")), false); // next week
+  assert.equal(commissioningWeek(undefined, sat), false);
+
+  for (const marked of [true, false]) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "salem-safety-"));
+    const cfgPath = path.join(dir, "openclaw.json");
+    fs.writeFileSync(cfgPath, JSON.stringify({ channels: { telegram: { botToken: "1:x", allowFrom: ["123"] } } }));
+    const today = new Date(Date.now() + 3 * 3600_000).toISOString().slice(0, 10);
+    if (marked) fs.writeFileSync(path.join(dir, "meter-test-sessions.json"), JSON.stringify({ ids: [], days: [today] }));
+    const sent = [];
+    const fetchImpl = async (url, init) => {
+      if (String(url).includes("api.telegram.org")) { sent.push(JSON.parse(init.body).text); return { ok: true, json: async () => ({}) }; }
+      if (String(url).endsWith("/key")) return { ok: true, json: async () => ({ data: { usage: 90, usage_daily: 40, usage_weekly: 88 } }) };
+      return { ok: true, json: async () => ({ data: { total_credits: 108.5, total_usage: 90 } }) }; // balance $18.5, ~1.5 days
+    };
+    const safety = createSafety({ stateDir: dir, configPath: cfgPath, log: { log() {}, warn() {} }, fetchImpl, keyResolver: async () => ({ key: "k" }) });
+    const f = await safety.fuseTick({ stopGateway: async () => {} });
+    assert.equal(f.runwayCommissioning, marked);
+    assert.equal(sent.some((t) => t.includes("covers about")), !marked, `marked=${marked}: ${JSON.stringify(sent)}`);
+  }
+});
