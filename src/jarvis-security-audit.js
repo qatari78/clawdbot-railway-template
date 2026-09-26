@@ -43,9 +43,10 @@ export async function runJarvisSecurityAuditV1({
   const startedAt = new Date().toISOString();
   const r = await runCmd(
     openclawNode,
-    // The deep probe authenticates with the gateway token (the CLI's own device identity lacks
-    // operator.read, which produced the "gateway.probe_failed" warning).
-    clawArgs(["security", "audit", "--deep", ...(gatewayToken ? ["--auth", "token", "--token", gatewayToken] : []), "--json"]),
+    // Note: "gateway.probe_failed" is the audit's own deep-probe client, which asks for no
+    // operator.read scope (an OpenClaw quirk; passing the token does not change it). The gateway
+    // itself is checked by the wrapper's health checks. Accepted 2026-09-26.
+    clawArgs(["security", "audit", "--deep", "--json"]),
     { timeoutMs: 120_000 },
   );
 

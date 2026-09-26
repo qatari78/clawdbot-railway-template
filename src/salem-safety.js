@@ -174,8 +174,9 @@ export function createSafety({ stateDir, configPath, log = console, fetchImpl = 
     return body?.data ?? body;
   }
 
-  async function fuseTick({ stopGateway } = {}) {
-    const t = thresholds();
+  async function fuseTick({ stopGateway, thresholdsOverride = null, label = "" } = {}) {
+    const t = thresholdsOverride ? { ...thresholds(), ...thresholdsOverride } : thresholds();
+    const tag = label ? `(${label}) ` : "";
     const now = Date.now();
     try {
       const key = await openRouterKey();
@@ -201,7 +202,7 @@ export function createSafety({ stateDir, configPath, log = console, fetchImpl = 
       fuse.runwayDays = fuse.balance != null && dailyAvg && dailyAvg > 0 ? fuse.balance / dailyAvg : null;
 
       if (fuse.spend60 > t.stopPerHour) {
-        const msg = `MONEY FUSE: $${fuse.spend60.toFixed(2)} spent in the last hour (limit $${t.stopPerHour}). ` +
+        const msg = `${tag}MONEY FUSE: $${fuse.spend60.toFixed(2)} spent in the last hour (limit $${t.stopPerHour}). ` +
           (t.dryRun ? "Dry run — Jarvis NOT stopped." : "Jarvis has been STOPPED and will stay stopped until restarted from /setup.");
         if (!t.dryRun) {
           fuse.tripped = true;
@@ -210,7 +211,7 @@ export function createSafety({ stateDir, configPath, log = console, fetchImpl = 
         }
         await sendAlert("money-fuse-stop", msg, { force: true });
       } else if (fuse.spend60 > t.alertPerHour) {
-        await sendAlert("money-fuse-alert", `High spend: $${fuse.spend60.toFixed(2)} in the last hour (alert level $${t.alertPerHour}; stop level $${t.stopPerHour}).`);
+        await sendAlert("money-fuse-alert", `${tag}High spend: $${fuse.spend60.toFixed(2)} in the last hour (alert level $${t.alertPerHour}; stop level $${t.stopPerHour}).`, { force: Boolean(label) });
       }
       if (fuse.balance != null && fuse.balance < t.lowBalance) {
         await sendAlert("low-balance", `OpenRouter balance is low: $${fuse.balance.toFixed(2)} left. Top up to keep Jarvis running.`, { dedupeMs: 12 * HOUR });

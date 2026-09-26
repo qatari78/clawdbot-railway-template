@@ -72,8 +72,10 @@ Use Jarvis Research System v1.1 as the shared evidence service for both rooms.
 - None: reasoning/writing where current factual investigation is unnecessary.
 - Lookup: one or two checkable facts through the read-only lookup path.
 - Verifier-only: one specific document or source.
-- Dual (default whenever a room question needs research): run \`research-01\` (Verifier) and \`research-02\` (Scout) concurrently and independently on the same de-identified neutral brief. They must not see each other's work, earlier conclusions, adviser views, or a shared sub-question plan.
-- Heavy: run both with deeper budgets for high stakes, exhaustive maps, multiple long documents, or unresolved material contradictions.
+- Dual (default whenever a room question needs research): the Verifier and the Scout research the same de-identified neutral brief concurrently and independently. They must not see each other's work, earlier conclusions, adviser views, or a shared sub-question plan.
+- Heavy: both with deeper budgets for high stakes, exhaustive maps, multiple long documents, or unresolved material contradictions.
+- HOW to run research (every level, every room): only through the research runner — write the neutral brief as JSON and run \`node /app/src/jarvis-research-runner.js run <brief.json> <verifier|dual|heavy>\`; for a seat's RESEARCH NEEDED use \`node /app/src/jarvis-research-gap.js <gap-request.json>\`. Run it in the foreground (exec with yieldMs 1200000 and timeoutSeconds 1500) or keep polling it with process until it finishes; tell the owner research is running if it takes more than a minute. The runner has search, tool budgets and time limits built in (measured 26 Sep: a dual run ≈ $0.27 and 4 minutes). Never spawn research-01 or research-02 as sub-agents: they have no search engine there and cost far more (the same test that way cost ≈ $10 in 12 minutes).
+- When spawning Forum or Counsel seats, pass runTimeoutSeconds equal to the wait limit (Forum 480, Counsel 1200).
 - Primary researchers are stateless: skills and shared evidence/cache persist; personal researcher memory does not.
 
 Research output goes to the append-only evidence ledger and compact active dossier. Researchers return typed evidence, dates, citations/locators, source lineage, contradictions, uncertainty, and open questions. They do not make the final recommendation, perform operational actions, modify configuration, or spawn children.
@@ -111,8 +113,8 @@ Forum runs only when the owner explicitly invokes Forum or directly addresses a 
 
 - No Forum seat is permanently the chair, chief, or synthesizer. Seat numbers are identity/memory/channel slots only.
 - Synthesis happens only when the owner commands it. Never synthesize automatically.
-- Forum synthesizer: Jarvis, unless the owner names a different seat/model for that run.
-- When a room participant is used as synthesizer after also advising, use a fresh isolated synthesis context and provide the frozen case/evidence packet plus all locked submissions. Its earlier adviser answer is one peer submission, not privileged.
+- Forum synthesizer: Jarvis. When the owner says "synthesize" (or similar) without naming anyone, Jarvis writes the Forum synthesis itself from the locked answers — never hand it to a Forum seat. Only when the owner names a seat or model for that run does that seat/model synthesize.
+- When a named Forum seat synthesizes after also advising, use a fresh isolated synthesis context and provide the frozen case/evidence packet plus all locked submissions. Its earlier adviser answer is one peer submission, not privileged.
 - Final synthesis must preserve material disagreements and evidence uncertainty rather than manufacturing consensus.
 - The synthesizer may change from run to run without changing any permanent seat identity, memory, or Telegram binding.
 

@@ -184,6 +184,7 @@ const safety = createSafety({ stateDir: STATE_DIR, configPath: configPath(), log
 const WRAPPER_STARTED_AT = Date.now();
 let watchdogFailures = 0;
 let watchdogBusy = false;
+let watchdogTestNote = null; // set by gateway.crash-test so the restart alert says it was a test
 
 // Gateway RPC for wrapper jobs (meter, pin checks). Throws on failure; returns the result object.
 async function gatewayCallJson(method, params, timeoutMs = 90_000) {
@@ -426,7 +427,6 @@ function launchJarvisSecurityAuditV1() {
     runCmd,
     clawArgs,
     openclawNode: OPENCLAW_NODE,
-    gatewayToken: OPENCLAW_GATEWAY_TOKEN,
   }).catch((err) => {
     console.warn(`[security-audit-v1] failed: ${String(err)}`);
   });
@@ -1349,6 +1349,8 @@ const ALLOWED_CONSOLE_COMMANDS = new Set([
   "latch.status",
   "fuse.status",
   "fuse.check",
+  "fuse.test",
+  "gateway.crash-test",
   "watchdog.status",
   "alert.test",
   "openclaw.gateway.call",
@@ -1356,6 +1358,7 @@ const ALLOWED_CONSOLE_COMMANDS = new Set([
   "test.cleanup",
   "meter.run",
   "meter.state",
+  "meter.top",
   "report.daily.preview",
   "report.daily.send",
   "report.weekly.preview",
@@ -1364,7 +1367,7 @@ const ALLOWED_CONSOLE_COMMANDS = new Set([
   "pins.reconcile",
   "disk.usage",
   "research.test",
-  "test.chat",
+  "seat.set",
 
   // OpenClaw CLI helpers
   "openclaw.version",
@@ -1414,6 +1417,23 @@ app.post("/setup/api/console/run", requireSetupAuth, async (req, res) => {
     if (cmd === "fuse.status") {
       return res.json({ ok: true, output: JSON.stringify(safety.fuseStatus(), null, 2) + "\n" });
     }
+    if (cmd === "fuse.test") {
+      // B3 proof with lowered thresholds, dry run: real spend numbers, stop level set below them,
+      // Jarvis is NOT stopped; the owner gets a clearly labelled test alert.
+      const f = await safety.fuseTick({
+        stopGateway: async () => {},
+        thresholdsOverride: { alertPerHour: 0, stopPerHour: 0.000001, dryRun: true },
+        label: "fuse test by Claude — no action needed",
+      });
+      return res.json({ ok: true, output: JSON.stringify(f, null, 2) + "\n" });
+    }
+    if (cmd === "gateway.crash-test") {
+      // B2 proof: kill the gateway WITHOUT latching; the watchdog must bring it back within ~2 min.
+      if (!gatewayProc) return res.json({ ok: false, output: "gateway not running\n" });
+      watchdogTestNote = "restart test by Claude — no action needed";
+      try { gatewayProc.kill("SIGKILL"); } catch {}
+      return res.json({ ok: true, output: "Gateway killed (SIGKILL, no latch). The watchdog should restart it within about 2 minutes.\n" });
+    }
     if (cmd === "fuse.check") {
       const f = await safety.fuseTick({ stopGateway: () => stopGatewayProc({ hardAfterMs: 10_000 }) });
       return res.json({ ok: true, output: JSON.stringify(f, null, 2) + "\n" });
@@ -1446,6 +1466,18 @@ app.post("/setup/api/console/run", requireSetupAuth, async (req, res) => {
     if (cmd === "meter.run") {
       const r = await meter.refreshLatest();
       return res.json({ ok: true, output: JSON.stringify({ today: r.today.text, yesterday: r.yesterday.text, todayDay: { ...r.today.day, topTasks: undefined }, cacheStatus: r.today.day.cacheStatus, railway: r.today.railway }, null, 2) + "\n" });
+    }
+    if (cmd === "meter.top") {
+      // Most expensive sessions of one day (numbers only), e.g. to explain a spend spike.
+      const date = /^\d{4}-\d{2}-\d{2}$/.test(arg) ? arg : new Date(Date.now() + 3 * 3600_000).toISOString().slice(0, 10);
+      const r = await gatewayCallJson("sessions.usage", { agentScope: "all", startDate: date, endDate: date, mode: "specific", timeZone: "Asia/Qatar", limit: 2000 }, 150_000);
+      const rows = (r?.sessions ?? []).map((x) => ({
+        key: x.key, agent: x.agentId, cost: Math.round((x.usage?.totalCost ?? 0) * 1000) / 1000,
+        input: x.usage?.input, cacheRead: x.usage?.cacheRead, cacheWrite: x.usage?.cacheWrite, output: x.usage?.output,
+        replies: x.usage?.messageCounts?.assistant, toolCalls: x.usage?.messageCounts?.toolCalls,
+        models: (x.usage?.modelUsage ?? []).map((m) => `${m.model} ×${m.count} $${Math.round((m.totals?.totalCost ?? 0) * 1000) / 1000}`),
+      })).filter((x) => x.cost > 0.005).sort((a, b) => b.cost - a.cost);
+      return res.json({ ok: true, output: JSON.stringify({ date, cacheStatus: r?.cacheStatus?.status ?? null, sessions: rows.length, total: Math.round(rows.reduce((t, x) => t + x.cost, 0) * 100) / 100, top: rows.slice(0, 30) }) + "\n" });
     }
     if (cmd === "meter.state") {
       return res.json({ ok: true, output: JSON.stringify(meter.state(), null, 2) + "\n" });
@@ -1519,24 +1551,20 @@ app.post("/setup/api/console/run", requireSetupAuth, async (req, res) => {
       }
       return res.json({ ok: failed.length === 0, output: JSON.stringify({ removed, failed }, null, 2) + "\n" });
     }
-    if (cmd === "test.chat") {
-      // Owner-path check on a TEST session only: chat.send runs slash commands (/model -a, /stop)
-      // with operator authority, exactly like the owner's chat. Never delivered to a channel.
+    if (cmd === "seat.set") {
+      // Operator path to set one seat's model (same config change as the owner's
+      // `/config set agents.entries.<seat>.model=...`). Jarvis keeps its fallback list.
       let spec;
-      try { spec = JSON.parse(arg || "{}"); } catch { return res.status(400).json({ ok: false, error: "arg must be JSON" }); }
-      const agentId = String(spec.agentId || "");
-      const suffix = String(spec.suffix || "");
-      const message = String(spec.message || "");
-      if (!/^(main|forum-0[1-3]|counsel-0[1-3]|research-0[12])$/.test(agentId)) return res.status(400).json({ ok: false, error: "bad agentId" });
-      if (!/^[a-z0-9-]{1,40}$/.test(suffix) || !message || message.length > 2000) return res.status(400).json({ ok: false, error: "bad suffix/message" });
-      const params = { sessionKey: `agent:${agentId}:explicit:claude-test-${suffix}`, agentId, message, deliver: false, idempotencyKey: crypto.randomUUID() };
-      const t0 = Date.now();
-      try {
-        const r = await gatewayCallJson("chat.send", params, 120_000);
-        return res.json({ ok: true, output: JSON.stringify({ wallMs: Date.now() - t0, result: r }, null, 2).slice(0, 20_000) + "\n" });
-      } catch (err) {
-        return res.json({ ok: false, output: JSON.stringify({ wallMs: Date.now() - t0, error: String(err).slice(0, 400) }) + "\n" });
-      }
+      try { spec = JSON.parse(arg || "{}"); } catch { return res.status(400).json({ ok: false, error: "arg must be JSON {seat, model}" }); }
+      const seat = String(spec.seat || "");
+      const model = String(spec.model || "");
+      if (!/^(main|forum-0[1-3]|counsel-0[1-3]|research-0[12])$/.test(seat)) return res.status(400).json({ ok: false, error: "bad seat" });
+      if (!/^openrouter\/[a-z0-9._-]+\/[a-z0-9._:-]+$/i.test(model)) return res.status(400).json({ ok: false, error: "bad model (openrouter/<vendor>/<model>)" });
+      let current = null;
+      try { current = JSON.parse(fs.readFileSync(configPath(), "utf8")).agents?.entries?.[seat]?.model ?? null; } catch {}
+      const pathKey = seat === "main" && current && typeof current === "object" ? `agents.entries.${seat}.model.primary` : `agents.entries.${seat}.model`;
+      const r = await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", pathKey, model]), { timeoutMs: 60_000 });
+      return res.status(r.code === 0 ? 200 : 500).json({ ok: r.code === 0, output: JSON.stringify({ seat, from: modelRefOf(current), to: model, path: pathKey, cli: redactSecrets(String(r.output || "")).slice(0, 400) }) + "\n" });
     }
     if (cmd === "research.test") {
       // One small dual research run through the production runner (Verifier + Scout via OpenRouter
@@ -2701,6 +2729,18 @@ function applyJarvisOperationalDefaults() {
       console.warn(`[room-protocol-seat-v1] failed: ${String(err)}`);
     }
 
+    // G1 finding (2026-09-26): research runs only through the research runner (search engine,
+    // tool budgets and time limits built in). Jarvis may not spawn the researcher agents
+    // directly — that path has no search provider and cost ~40x more in the Counsel test.
+    {
+      const mainSub = cfg.agents?.entries?.main?.subagents;
+      if (mainSub && Array.isArray(mainSub.allowAgents)) {
+        const before = mainSub.allowAgents.length;
+        mainSub.allowAgents = mainSub.allowAgents.filter((id) => id !== "research-01" && id !== "research-02");
+        if (mainSub.allowAgents.length !== before) console.log("[research-path-v1] Jarvis spawns seats only; research goes through the runner");
+      }
+    }
+
     fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
     console.log("[wrapper] Jarvis operational defaults + non-revenue-token controls applied");
   } catch (err) {
@@ -2737,7 +2777,9 @@ async function gatewayWatchdogTick() {
     await stopGatewayProc({ hardAfterMs: 10_000 });
     try { await ensureGatewayRunning(); } catch (err) { console.warn(`[watchdog-v1] restart failed: ${String(err)}`); }
     watchdogFailures = 0;
-    await safety.sendAlert("watchdog-restart", `Jarvis ${reason} and was restarted automatically (${n}/3 this hour).`);
+    const note = watchdogTestNote ? ` (${watchdogTestNote})` : "";
+    watchdogTestNote = null;
+    await safety.sendAlert("watchdog-restart", `Jarvis ${reason} and was restarted automatically (${n}/3 this hour)${note}.`, note ? { force: true } : {});
   } finally {
     watchdogBusy = false;
   }
