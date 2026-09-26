@@ -16,10 +16,11 @@ const bucket = (isoUtc) => {
   return { date, quarterIndex: qi };
 };
 
-function session(key, agentId, { costs = [], users = [], assistant = 0, toolCalls = 0, errors = 0, latency = null } = {}) {
+function session(key, agentId, { costs = [], users = [], assistant = 0, toolCalls = 0, errors = 0, latency = null, models = [] } = {}) {
   return {
     key, agentId,
     usage: {
+      modelUsage: models.map(([model, count, cost]) => ({ provider: "openrouter", model, count, totals: { totalCost: cost } })),
       utcQuarterHourTokenUsage: costs.map(([iso, c]) => ({ ...bucket(iso), totalCost: c })),
       utcQuarterHourMessageCounts: users.map(([iso, n]) => ({ ...bucket(iso), user: n })),
       messageCounts: { assistant, toolCalls, errors, user: users.reduce((s, [, n]) => s + n, 0) },
@@ -58,12 +59,12 @@ test("costs are charged to the owner's most recent message; rooms and background
         assistant: 3, latency: { count: 3, avgMs: 2000, p95Ms: 3000 },
       }),
       // Forum run triggered by the 06:00Z message, finishing 20 min later
-      session("agent:forum-01:abc", "forum-01", { costs: [["2026-09-25T06:20:00Z", 1.0]], assistant: 1 }),
+      session("agent:forum-01:abc", "forum-01", { costs: [["2026-09-25T06:20:00Z", 1.0]], assistant: 1, models: [["x-ai/grok-4.7", 1, 1.0], ["gateway-injected", 2, 0]] }),
       session("agent:counsel-01:def", "counsel-01", { costs: [["2026-09-25T09:10:00Z", 3.0]], assistant: 1 }),
       // outside the window: must be ignored
       session("agent:main:whatsapp:direct:+974b", "main", { users: [["2026-09-25T22:00:00Z", 5]], costs: [["2026-09-25T22:00:00Z", 9]] }),
       // test session: reported separately, never a task
-      session("agent:main:explicit:claude-test-x", "main", { users: [["2026-09-25T10:00:00Z", 1]], costs: [["2026-09-25T10:00:00Z", 0.3]] }),
+      session("agent:main:explicit:claude-test-x", "main", { users: [["2026-09-25T10:00:00Z", 1]], costs: [["2026-09-25T10:00:00Z", 0.3]], models: [["x-ai/grok-4.7", 5, 0.3]] }),
     ],
   };
   const d = computeDay(result, { windowStart: start, windowEnd: start + 86_400_000 });
@@ -81,6 +82,9 @@ test("costs are charged to the owner's most recent message; rooms and background
   assert.equal(d.byAgent["counsel-01"].calls, 1);
   assert.equal(d.latency.avgMs, 2000);
   assert.equal(d.cacheHitRate, 0.9);
+  // models come from real (non-test) rows; zero-cost pseudo models are hidden
+  assert.deepEqual(d.byModel.map((m) => [m.model, m.calls, m.cost]), [["x-ai/grok-4.7", 1, 1.0]]);
+  assert.deepEqual(d.byAgentModel["forum-01"].map((m) => m.model), ["x-ai/grok-4.7"]);
 });
 
 test("percentile", () => {
@@ -120,6 +124,8 @@ test("scout finds price changes and new models; first run is a baseline", () => 
   assert.deepEqual(s.newFromSeatLabs.map((m) => m.id), ["x-ai/grok-5"]);
   assert.deepEqual(s.newOtherLabs.map((m) => m.id), ["google/gemini-4-pro"]);
   assert.equal(scoutModels({ current: cur, previous: null, seatModels: [] }).baseline, true);
-  const text = renderWeekly({ startDate: "2026-09-20", endDate: "2026-09-26", week: computeDay({ sessions: [] }, { windowStart: 0, windowEnd: 1 }), perSeat: [{ label: "Jarvis", model: "openrouter/openai/gpt-6-sol", calls: 0, cost: 0 }], scout: s, lineup: { warnings: [] } });
+  const text = renderWeekly({ startDate: "2026-09-20", endDate: "2026-09-26", week: computeDay({ sessions: [] }, { windowStart: 0, windowEnd: 1 }), perSeat: [{ label: "Jarvis", model: "openrouter/openai/gpt-6-sol", calls: 0, cost: 0, models: [{ model: "x-ai/grok-4.7", calls: 4, cost: 2 }, { model: "openai/gpt-6-sol", calls: 10, cost: 0.03 }] }], scout: s, lineup: { warnings: [] } });
   assert.match(text, /Nothing is switched automatically/);
+  assert.match(text, /grok-4\.7 \(earlier\): 4 × \$0\.50 = \$2\.00/);
+  assert.match(text, /gpt-6-sol: 10 × \$0\.0030 = \$0\.03/);
 });

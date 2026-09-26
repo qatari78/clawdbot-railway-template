@@ -129,7 +129,9 @@ async function callResearch({apiKey,model,researcher,brief,searchEngine,level}){
     ],
     tool_choice:"required",
     max_tool_calls:toolBudget(level,researcher),
-    temperature:0.1
+    temperature:0.1,
+    // D6 privacy: only providers that do not collect data (JARVIS_PRIVACY_ROUTING=off to disable).
+    ...(process.env.JARVIS_PRIVACY_ROUTING?.trim()==="off"?{}:{provider:{data_collection:"deny"}})
   };
   const controller=new AbortController();
   const timer=setTimeout(()=>controller.abort(),level==="heavy"?20*60*1000:10*60*1000);
@@ -182,8 +184,12 @@ export async function runResearchBrief({brief,level="dual",ledgerBriefId=null}){
   const auth=await resolveOpenRouterKeyForRuntime({stateDir:stateDir(),configPath:configPath()});
   if(!auth.key)throw new Error("OpenRouter credential could not be resolved from canonical runtime auth stores");
 
-  const verifierModel=process.env.JARVIS_RESEARCH_VERIFIER_MODEL?.trim()||"openrouter/openai/gpt-6-sol";
-  const scoutModel=process.env.JARVIS_RESEARCH_SCOUT_MODEL?.trim()||"openrouter/deepseek/deepseek-v4-flash-0731";
+  // The research seats' models come from the live config (research-01 Verifier, research-02 Scout),
+  // so an owner switch (/config set agents.entries.research-0N.model=...) takes effect here too.
+  let liveCfg=null;try{liveCfg=JSON.parse(fs.readFileSync(configPath(),"utf8"));}catch{}
+  const seatModel=(id)=>{const m=liveCfg?.agents?.entries?.[id]?.model;return typeof m==="string"?m:(m&&typeof m.primary==="string"?m.primary:null);};
+  const verifierModel=seatModel("research-01")||process.env.JARVIS_RESEARCH_VERIFIER_MODEL?.trim()||"openrouter/openai/gpt-6-sol";
+  const scoutModel=seatModel("research-02")||process.env.JARVIS_RESEARCH_SCOUT_MODEL?.trim()||"openrouter/deepseek/deepseek-v4-flash-0731";
   const verifierSearchEngine=process.env.JARVIS_RESEARCH_VERIFIER_SEARCH_ENGINE?.trim()||"native";
   const scoutSearchEngine=process.env.JARVIS_RESEARCH_SCOUT_SEARCH_ENGINE?.trim()||"perplexity";
 

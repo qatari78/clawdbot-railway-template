@@ -105,7 +105,8 @@ async function callSupportModel({apiKey,cases}){
     ],
     response_format:{type:"json_schema",json_schema:schema},
     reasoning:{effort:"medium"},
-    temperature:0
+    temperature:0,
+    ...(process.env.JARVIS_PRIVACY_ROUTING?.trim()==="off"?{}:{provider:{data_collection:"deny"}})
   };
   const controller=new AbortController();
   const timer=setTimeout(()=>controller.abort(),5*60*1000);

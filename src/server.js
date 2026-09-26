@@ -426,6 +426,7 @@ function launchJarvisSecurityAuditV1() {
     runCmd,
     clawArgs,
     openclawNode: OPENCLAW_NODE,
+    gatewayToken: OPENCLAW_GATEWAY_TOKEN,
   }).catch((err) => {
     console.warn(`[security-audit-v1] failed: ${String(err)}`);
   });
@@ -1007,9 +1008,10 @@ function runCmd(cmd, args, opts = {}) {
   return new Promise((resolve) => {
     const timeoutMs = Number.isFinite(opts.timeoutMs) ? opts.timeoutMs : 120_000;
 
+    const { extraEnv, ...spawnOpts } = opts;
     const proc = childProcess.spawn(cmd, args, {
-      ...opts,
-      env: childEnv(),
+      ...spawnOpts,
+      env: childEnv(extraEnv && typeof extraEnv === "object" ? extraEnv : {}),
     });
 
     let out = "";
@@ -1361,6 +1363,8 @@ const ALLOWED_CONSOLE_COMMANDS = new Set([
   "privacy.check",
   "pins.reconcile",
   "disk.usage",
+  "research.test",
+  "test.chat",
 
   // OpenClaw CLI helpers
   "openclaw.version",
@@ -1395,7 +1399,7 @@ app.post("/setup/api/console/run", requireSetupAuth, async (req, res) => {
     }
     if (cmd === "gateway.stop") {
       // B5: a deliberate stop latches — watchdog, UI visits and container restarts will not revive it.
-      safety.setLatch("owner-console", "setup");
+      safety.setLatch(arg === "commissioning-test" ? "commissioning-test" : "owner-console", "setup");
       await stopGatewayProc({ hardAfterMs: 10_000 });
       return res.json({ ok: true, output: "Gateway stopped and latched (stays stopped until gateway.start).\n" });
     }
@@ -1514,6 +1518,55 @@ app.post("/setup/api/console/run", requireSetupAuth, async (req, res) => {
         }
       }
       return res.json({ ok: failed.length === 0, output: JSON.stringify({ removed, failed }, null, 2) + "\n" });
+    }
+    if (cmd === "test.chat") {
+      // Owner-path check on a TEST session only: chat.send runs slash commands (/model -a, /stop)
+      // with operator authority, exactly like the owner's chat. Never delivered to a channel.
+      let spec;
+      try { spec = JSON.parse(arg || "{}"); } catch { return res.status(400).json({ ok: false, error: "arg must be JSON" }); }
+      const agentId = String(spec.agentId || "");
+      const suffix = String(spec.suffix || "");
+      const message = String(spec.message || "");
+      if (!/^(main|forum-0[1-3]|counsel-0[1-3]|research-0[12])$/.test(agentId)) return res.status(400).json({ ok: false, error: "bad agentId" });
+      if (!/^[a-z0-9-]{1,40}$/.test(suffix) || !message || message.length > 2000) return res.status(400).json({ ok: false, error: "bad suffix/message" });
+      const params = { sessionKey: `agent:${agentId}:explicit:claude-test-${suffix}`, agentId, message, deliver: false, idempotencyKey: crypto.randomUUID() };
+      const t0 = Date.now();
+      try {
+        const r = await gatewayCallJson("chat.send", params, 120_000);
+        return res.json({ ok: true, output: JSON.stringify({ wallMs: Date.now() - t0, result: r }, null, 2).slice(0, 20_000) + "\n" });
+      } catch (err) {
+        return res.json({ ok: false, output: JSON.stringify({ wallMs: Date.now() - t0, error: String(err).slice(0, 400) }) + "\n" });
+      }
+    }
+    if (cmd === "research.test") {
+      // One small dual research run through the production runner (Verifier + Scout via OpenRouter
+      // server tools, then source and support checks). arg "off" = without privacy routing.
+      const dir = path.join(STATE_DIR, "tmp");
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      const briefPath = path.join(dir, `research-test-${Date.now()}.json`);
+      fs.writeFileSync(briefPath, JSON.stringify({
+        question: "What are OpenRouter's current list prices (input and output, US$ per million tokens) for the model openai/gpt-6-sol, and on which provider(s) is it served?",
+        jurisdiction: "global/public product pages",
+        period: "current",
+        definitions: "List price = OpenRouter's published per-token price, before discounts or caching.",
+        comparison_scope: "OpenRouter's own model page or API first.",
+        stakes: "commissioning test only (low)",
+        freshness: "current",
+        exclusions: ["No recommendation.", "No private or logged-in pages."],
+      }, null, 2), { mode: 0o600 });
+      const t0 = Date.now();
+      const r = await runCmd(OPENCLAW_NODE, [path.join(process.cwd(), "src", "jarvis-research-runner.js"), "run", briefPath, "dual"], {
+        timeoutMs: 16 * 60 * 1000,
+        extraEnv: { JARVIS_PRIVACY_ROUTING: arg === "off" ? "off" : "deny" },
+      });
+      try { fs.unlinkSync(briefPath); } catch {}
+      const parsed = parseJsonFromOutput(r.output);
+      const sm = parsed?.summary;
+      return res.json({ ok: r.code === 0, output: JSON.stringify(sm ? {
+        wallMs: Date.now() - t0, pass: sm.pass, failures: sm.failures, total_cost_usd: sm.total_cost_usd,
+        telemetry: (sm.telemetry || []).map((x) => ({ researcher: x.researcher, model: x.model, provider: x.provider, search_engine: x.search_engine, search_requests: x.search_requests, cost: x.usage?.cost })),
+        merge: sm.merge, verification: sm.verification, semantic_support: sm.semantic_support,
+      } : { code: r.code, head: redactSecrets(String(r.output || "")).slice(0, 1500) }, null, 2) + "\n" });
     }
     if (cmd === "disk.usage") {
       const r = await runCmd("bash", ["-c", "df -h / /data 2>/dev/null; echo; du -xh -d 3 /data 2>/dev/null | sort -h | tail -45"], { timeoutMs: 180_000 });
@@ -2221,6 +2274,20 @@ function applyJarvisOperationalDefaults() {
       console.log("[wrapper] restored OpenRouter provider auth-profile binding (memory embeddings)");
     }
 
+    // D6 privacy (2026-09-26): every OpenRouter chat request may only use providers that do not
+    // collect data. Checked live first (privacy.check): all seat models are served under this
+    // rule; only the Scout's provider changes (DeepSeek: StreamLake → Sail Research). Per-model
+    // routing (e.g. MiMo pinned to Xiaomi) merges on top. JARVIS_PRIVACY_ROUTING=off disables it.
+    if (orProvider) {
+      orProvider.params ??= {};
+      const routing = { ...(orProvider.params.provider && typeof orProvider.params.provider === "object" ? orProvider.params.provider : {}) };
+      if (process.env.JARVIS_PRIVACY_ROUTING?.trim() === "off") delete routing.data_collection;
+      else routing.data_collection = "deny";
+      if (Object.keys(routing).length) orProvider.params.provider = routing; else delete orProvider.params.provider;
+      if (Object.keys(orProvider.params).length === 0) delete orProvider.params;
+      console.log("[privacy-routing-v1] " + JSON.stringify({ dataCollection: routing.data_collection ?? "provider-default" }));
+    }
+
     cfg.tools ??= {};
     // Remove stale legacy explicit allowlists. They override profile resolution and
     // can make leaf adviser agents fail before the model is called.
@@ -2771,7 +2838,9 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
   const bootLatch = safety.latchInfo();
   if (isConfigured() && bootLatch) {
     console.log("[latch-v1] gateway NOT started at boot: " + JSON.stringify(bootLatch));
-    void safety.sendAlert("latched-boot", `Salem AI restarted, but Jarvis stays STOPPED (reason: ${bootLatch.reason}). Start it from /setup → gateway.start when ready.`, { dedupeMs: 6 * 60 * 60 * 1000 });
+    void safety.sendAlert("latched-boot", bootLatch.reason === "commissioning-test"
+      ? "Restart test: Salem AI came back in STOPPED mode, as designed after a deliberate stop. Claude restarts Jarvis within minutes — no action needed."
+      : `Salem AI restarted, but Jarvis stays STOPPED (reason: ${bootLatch.reason}). Start it from /setup → gateway.start when ready.`, { dedupeMs: 6 * 60 * 60 * 1000 });
   }
 
   // Auto-start the gateway if already configured so polling channels (Telegram/Discord/etc.)

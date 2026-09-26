@@ -30,6 +30,7 @@ export async function runJarvisSecurityAuditV1({
   runCmd,
   clawArgs,
   openclawNode,
+  gatewayToken,
 }) {
   if (process.env.JARVIS_SECURITY_AUDIT_V1?.trim() !== "1") {
     return { ran: false, reason: "disabled" };
@@ -42,7 +43,9 @@ export async function runJarvisSecurityAuditV1({
   const startedAt = new Date().toISOString();
   const r = await runCmd(
     openclawNode,
-    clawArgs(["security", "audit", "--deep", "--json"]),
+    // The deep probe authenticates with the gateway token (the CLI's own device identity lacks
+    // operator.read, which produced the "gateway.probe_failed" warning).
+    clawArgs(["security", "audit", "--deep", ...(gatewayToken ? ["--auth", "token", "--token", gatewayToken] : []), "--json"]),
     { timeoutMs: 120_000 },
   );
 

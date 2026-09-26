@@ -96,6 +96,8 @@ export function computeDay(result, { windowStart, windowEnd, includeTests = fals
   const taskBuckets = new Map(); // bucketMs -> owner messages
   const costBuckets = new Map(); // bucketMs -> cost (all agents)
   const byAgent = new Map();
+  const byModelMap = new Map();
+  const byAgentModel = new Map();
   let testCost = 0;
   const latency = { count: 0, sumMs: 0, p95Max: NaN };
   let maxToolCalls = 0;
@@ -107,6 +109,17 @@ export function computeDay(result, { windowStart, windowEnd, includeTests = fals
     if (!includeTests && isTestSession(r.key)) {
       for (const b of u.utcQuarterHourTokenUsage ?? []) if (inWindow(bucketMs(b))) testCost += Number(b.totalCost) || 0;
       continue;
+    }
+    for (const mu of u.modelUsage ?? []) {
+      const model = String(mu.model || "?");
+      const cost = Number(mu.totals?.totalCost) || 0;
+      const calls = Number(mu.count) || 0;
+      if (cost <= 0 && model === "gateway-injected") continue;
+      const m = byModelMap.get(model) ?? { model, provider: mu.provider, calls: 0, cost: 0 };
+      m.calls += calls; m.cost += cost; byModelMap.set(model, m);
+      const am = byAgentModel.get(r.agentId) ?? new Map();
+      const e = am.get(model) ?? { model, calls: 0, cost: 0 };
+      e.calls += calls; e.cost += cost; am.set(model, e); byAgentModel.set(r.agentId, am);
     }
     const a = byAgent.get(r.agentId) ?? { cost: 0, calls: 0 };
     for (const b of u.utcQuarterHourTokenUsage ?? []) {
@@ -152,10 +165,7 @@ export function computeDay(result, { windowStart, windowEnd, includeTests = fals
   const totalCost = [...costBuckets.values()].reduce((s, c) => s + c, 0);
   const totals = result?.totals ?? {};
   const inputAll = (Number(totals.input) || 0) + (Number(totals.cacheRead) || 0) + (Number(totals.cacheWrite) || 0);
-  const byModel = (result?.aggregates?.byModel ?? [])
-    .map((m) => ({ model: m.model, provider: m.provider, calls: m.count, cost: Number(m.totals?.totalCost) || 0 }))
-    .filter((m) => m.cost > 0 || m.calls > 0)
-    .sort((a, b) => b.cost - a.cost);
+  const byModel = [...byModelMap.values()].filter((m) => m.cost > 0.0005).sort((a, b) => b.cost - a.cost);
   const rooms = {};
   for (const [agentId, a] of byAgent) rooms[roomOf(agentId)] = (rooms[roomOf(agentId)] ?? 0) + a.cost;
 
@@ -172,6 +182,7 @@ export function computeDay(result, { windowStart, windowEnd, includeTests = fals
     topTasks: tasks.slice().sort((a, b) => b.cost - a.cost).slice(0, 3),
     rooms,
     byAgent: Object.fromEntries([...byAgent.entries()].map(([k, v]) => [k, { cost: v.cost, calls: v.calls }])),
+    byAgentModel: Object.fromEntries([...byAgentModel.entries()].map(([k, m]) => [k, [...m.values()].sort((x, y) => y.cost - x.cost)])),
     byModel,
     latency: { avgMs: latency.count ? latency.sumMs / latency.count : NaN, p95Ms: latency.p95Max, replies: latency.count },
     cacheHitRate: inputAll > 0 ? (Number(totals.cacheRead) || 0) / inputAll : NaN,
@@ -202,10 +213,12 @@ export function renderDaily({ date, day, orCheck, mtd, balance, railway }) {
   lines.push(`📊 Salem AI meter — ${fmtDay(date)} (Qatar day)`);
   let spend = `Spend: ${money(day.totalCost)}`;
   if (day.testCost > 0.0005) spend += ` (+ ${money(day.testCost)} commissioning tests)`;
-  if (Number.isFinite(orCheck?.spend)) {
+  if (orCheck?.coverage === "full" && Number.isFinite(orCheck.spend)) {
     const metered = day.totalCost + (day.testCost || 0);
     const diff = orCheck.spend > 0 ? Math.abs(metered - orCheck.spend) / orCheck.spend : 0;
-    spend += ` · OpenRouter ${money(orCheck.spend)}${orCheck.coverage === "full" ? ` (${(diff * 100).toFixed(1)}% apart)` : " (samples cover part of the day)"}`;
+    spend += ` · OpenRouter says ${money(orCheck.spend)} (${(diff * 100).toFixed(1)}% apart)`;
+  } else if (orCheck?.coverage === "partial" && Number.isFinite(orCheck.since)) {
+    spend += ` · OpenRouter check starts with full days (sampling began ${new Date(orCheck.since).toISOString().slice(0, 16).replace("T", " ")} UTC)`;
   }
   lines.push(spend);
   if (day.taskCount > 0) {
@@ -216,7 +229,7 @@ export function renderDaily({ date, day, orCheck, mtd, balance, railway }) {
   const rooms = Object.entries(day.rooms).filter(([, c]) => c > 0.0005).sort((a, b) => b[1] - a[1]);
   if (rooms.length) lines.push("By room: " + rooms.map(([r, c]) => `${r} ${money(c)}`).join(" · "));
   if (day.byModel.length) lines.push("By model: " + day.byModel.slice(0, 6).map((m) => `${shortModel(m.model)} ${money(m.cost)}`).join(" · "));
-  if (day.latency.replies) lines.push(`Speed: avg reply ${secs(day.latency.avgMs)}, slowest 5% ${secs(day.latency.p95Ms)}`);
+  if (day.latency.replies) lines.push(`Speed (Jarvis model time per reply step): avg ${secs(day.latency.avgMs)}, slowest 5% ${secs(day.latency.p95Ms)}`);
   if (Number.isFinite(day.cacheHitRate)) lines.push(`Cache: ${(day.cacheHitRate * 100).toFixed(0)}% of input served from cache`);
   if (day.topTasks.length && day.taskCount > 1) lines.push("Top tasks: " + day.topTasks.map((t) => `${fmtClock(t.at)} ${money(t.cost)}`).join(" · "));
   if (day.background > 0.005) lines.push(`Background (no message, e.g. nightly memory): ${money(day.background)}`);
@@ -293,9 +306,12 @@ export function renderWeekly({ startDate, endDate, week, perSeat, scout, lineup 
   lines.push(`📈 Salem AI weekly $/task — ${fmtDay(startDate)} to ${fmtDay(endDate)}`);
   lines.push(`Tasks: ${week.taskCount} · spend ${money(week.totalCost)} · $/task median ${money(week.perTask.median)}, p90 ${money(week.perTask.p90)}, all-in avg ${money(week.perTask.allIn)}`);
   lines.push("");
-  lines.push("Your seats this week (real): seat · model · replies · $/reply");
+  lines.push("Your seats this week (real use): seat — model: replies × $/reply = total");
   for (const s of perSeat) {
-    lines.push(`• ${s.label} · ${shortModel(s.model)} · ${s.calls} · ${s.calls ? money(s.cost / s.calls) : "—"}${s.cost ? ` (total ${money(s.cost)})` : ""}`);
+    const used = (s.models || []).filter((m) => m.calls > 0 || m.cost > 0);
+    if (!used.length) { lines.push(`• ${s.label} (now ${shortModel(s.model)}) — no use this week`); continue; }
+    const parts = used.slice(0, 3).map((m) => `${shortModel(m.model)}${shortModel(m.model) === shortModel(s.model) ? "" : " (earlier)"}: ${m.calls} × ${m.calls ? money(m.cost / m.calls) : "—"} = ${money(m.cost)}`);
+    lines.push(`• ${s.label} — ${parts.join("; ")}`);
   }
   lines.push("");
   lines.push(`Public $/task reference (${PUBLIC_REFERENCE.indexVersion}):`);
@@ -454,6 +470,7 @@ export function createMeter({ stateDir, workspaceDir, dataDir = "/data", gateway
       model: s.model,
       calls: week.byAgent[s.id]?.calls ?? 0,
       cost: week.byAgent[s.id]?.cost ?? 0,
+      models: week.byAgentModel?.[s.id] ?? [],
     }));
     let current = [];
     try {
