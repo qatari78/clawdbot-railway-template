@@ -538,7 +538,9 @@ function applyJarvisMultiAgentScaffoldV1(workspaceDir) {
       continue;
     }
 
-    if (seat.model && existingSeat.model !== seat.model) {
+    // Seat models are owned by the seat config (Railway variables applied only when they
+    // change) and by the owner's runtime switches; the scaffold only fills a missing model.
+    if (seat.model && !existingSeat.model) {
       existingSeat.model = seat.model;
       configChanged = true;
     }
@@ -621,9 +623,8 @@ function applyJarvisMultiAgentScaffoldV1(workspaceDir) {
     if (!verified.agents?.entries?.[id]) {
       throw new Error("multi-agent scaffold verification failed: missing " + id);
     }
-    const expectedSeat = seats.find((seat) => seat.id === id);
-    if (expectedSeat?.model && verified.agents.entries[id].model !== expectedSeat.model) {
-      throw new Error("multi-agent scaffold verification failed: model assignment mismatch on " + id);
+    if (!verified.agents.entries[id].model && seats.find((seat) => seat.id === id)?.model) {
+      throw new Error("multi-agent scaffold verification failed: model missing on " + id);
     }
     if (!verified.agents?.entries?.main?.subagents?.allowAgents?.includes(id)) {
       throw new Error("multi-agent scaffold verification failed: main cannot spawn " + id);

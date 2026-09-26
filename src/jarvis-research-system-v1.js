@@ -173,7 +173,9 @@ function upsert(file, heading, lines) {
 
 function setResearcher(cfg,id,name,model,skill,skillText,role) {
   const e=cfg.agents?.entries?.[id]; if(!e)return null;
-  e.name=name; e.identity??={}; e.identity.name=name; e.model=model; e.thinkingDefault="high";
+  // Model and thinking are filled only when missing: the seat config (env applied on change)
+  // and the owner's runtime switches own them afterwards (G3, 2026-09-26).
+  e.name=name; e.identity??={}; e.identity.name=name; if(!e.model) e.model=model; if(!e.thinkingDefault) e.thinkingDefault="high";
   e.subagents={allowAgents:[]}; e.tools??={}; e.tools.profile="full";
   e.tools.allow=["browser","web_search","web_fetch"];
   e.tools.deny=uniq([...(Array.isArray(e.tools.deny)?e.tools.deny:[]),

@@ -160,10 +160,13 @@ function findKeys({ stateDir, configPath }) {
     add({ source: "config-env", agentId: null, profileId: null, key: cfgKey });
   }
   const providerKey = cfg?.models?.providers?.openrouter?.apiKey;
+  // "openrouter:default" style values are auth-profile bindings (OpenClaw resolves them to the
+  // profile's key at request time — memory embeddings depend on it), not literal keys.
   if (
     typeof providerKey === "string" &&
     !providerKey.startsWith("${") &&
-    providerKey !== "secretref-managed"
+    providerKey !== "secretref-managed" &&
+    !/^[a-z0-9_-]+:[a-z0-9_.-]+$/i.test(providerKey)
   ) {
     add({ source: "config-provider", agentId: null, profileId: null, key: providerKey });
   }

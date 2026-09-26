@@ -17,6 +17,13 @@ function uniq(values) {
   return Array.from(new Set((values || []).filter(Boolean)));
 }
 
+// An agent's model is either "provider/model" or { primary, fallbacks } (OpenClaw schema).
+export function modelRefOf(model) {
+  if (typeof model === "string") return model;
+  if (model && typeof model === "object" && typeof model.primary === "string") return model.primary;
+  return null;
+}
+
 function ensureModel(cfg, modelRef) {
   if (!modelRef) return null;
   cfg.agents ??= {};
@@ -26,12 +33,16 @@ function ensureModel(cfg, modelRef) {
   return cfg.agents.defaults.models[modelRef];
 }
 
-function setSeat(cfg, id, { model, thinking }) {
+function setSeat(cfg, id, { model, thinking, fallbacks }) {
   const entry = cfg.agents?.entries?.[id];
   if (!entry) return false;
   if (model) {
-    entry.model = model;
+    // F2: only Jarvis gets a fallback list; every seat stays strict (a string model never
+    // inherits agents.defaults fallbacks), so no seat is ever swapped silently.
+    const list = Array.isArray(fallbacks) ? fallbacks.filter((f) => f && f !== model) : [];
+    entry.model = list.length ? { primary: model, fallbacks: list } : model;
     ensureModel(cfg, model);
+    for (const f of list) ensureModel(cfg, f);
   }
   if (thinking === "provider-default") {
     delete entry.thinkingDefault;
@@ -58,7 +69,13 @@ export const SEAT_IDS = ["main", "forum-01", "forum-02", "forum-03", "counsel-01
 export function computeLineup(cfg, { counsel03Active = false } = {}) {
   const entries = cfg?.agents?.entries ?? {};
   const seat = (id) => entries[id]
-    ? { id, model: entries[id].model ?? null, thinking: entries[id].thinkingDefault ?? "provider-default", lab: labOf(entries[id].model) }
+    ? {
+      id,
+      model: modelRefOf(entries[id].model),
+      ...(Array.isArray(entries[id].model?.fallbacks) && entries[id].model.fallbacks.length ? { fallbacks: entries[id].model.fallbacks } : {}),
+      thinking: entries[id].thinkingDefault ?? "provider-default",
+      lab: labOf(modelRefOf(entries[id].model)),
+    }
     : null;
   const forum = ["forum-01", "forum-02", "forum-03"].map(seat).filter(Boolean);
   const counsel = ["counsel-01", "counsel-02", ...(counsel03Active ? ["counsel-03"] : [])].map(seat).filter(Boolean);
@@ -87,13 +104,21 @@ export function applyJarvisSeatConfigV1({ cfg, stateDir, workspaceDir } = {}) {
     model: process.env[modelVar]?.trim() || model,
     thinking: process.env[thinkingVar]?.trim() || thinking,
   }];
+  // F2: Jarvis's approved fallback (a different company from its primary). "none" disables it.
+  const mainFallbacksRaw = process.env.JARVIS_MAIN_FALLBACKS?.trim() || "openrouter/x-ai/grok-4.7";
+  const mainFallbacks = mainFallbacksRaw === "none" ? [] : mainFallbacksRaw.split(",").map((x) => x.trim()).filter(Boolean);
+  const mainSeat = envSeat("main", "JARVIS_MAIN_MODEL", "JARVIS_MAIN_THINKING", "openrouter/openai/gpt-6-sol", "high");
+  mainSeat[1].fallbacks = mainFallbacks;
   const assignments = Object.fromEntries([
-    envSeat("main", "JARVIS_MAIN_MODEL", "JARVIS_MAIN_THINKING", "openrouter/x-ai/grok-4.7", "high"),
+    mainSeat,
     envSeat("forum-01", "JARVIS_FORUM_01_MODEL", "JARVIS_FORUM_01_THINKING", "openrouter/qwen/qwen3.8-max-0902", "xhigh"),
     envSeat("forum-02", "JARVIS_FORUM_02_MODEL", "JARVIS_FORUM_02_THINKING", "openrouter/meta/muse-spark-1.3", "xhigh"),
     envSeat("forum-03", "JARVIS_FORUM_03_MODEL", "JARVIS_FORUM_03_THINKING", "openrouter/xiaomi/mimo-v2.6-pro", "provider-default"),
     envSeat("counsel-01", "JARVIS_COUNSEL_01_MODEL", "JARVIS_COUNSEL_01_THINKING", "openrouter/anthropic/claude-opus-5.5", "max"),
     envSeat("counsel-02", "JARVIS_COUNSEL_02_MODEL", "JARVIS_COUNSEL_02_THINKING", "openrouter/openai/gpt-6-astra", "max"),
+    // Researchers are swappable seats too (G3); the research system only fills them when missing.
+    envSeat("research-01", "JARVIS_RESEARCH_VERIFIER_MODEL", "JARVIS_RESEARCH_VERIFIER_THINKING", "openrouter/openai/gpt-6-sol", "high"),
+    envSeat("research-02", "JARVIS_RESEARCH_SCOUT_MODEL", "JARVIS_RESEARCH_SCOUT_THINKING", "openrouter/deepseek/deepseek-v4-flash-0731", "high"),
   ]);
 
   // Apply a seat's Railway variables only when they changed since the last boot that
@@ -135,7 +160,7 @@ export function applyJarvisSeatConfigV1({ cfg, stateDir, workspaceDir } = {}) {
   }
 
   // Keep the default primary aligned with Jarvis's configured model (runtime switches included).
-  const mainModel = cfg.agents.entries.main.model;
+  const mainModel = modelRefOf(cfg.agents.entries.main.model);
   cfg.agents.defaults.model ??= {};
   if (typeof cfg.agents.defaults.model === "string") {
     cfg.agents.defaults.model = { primary: mainModel };

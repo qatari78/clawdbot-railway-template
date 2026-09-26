@@ -15,9 +15,11 @@ import { runJarvisAdviserMemoryCommissioningV1 } from "./jarvis-adviser-memory-c
 import { runJarvisSecurityAuditV1 } from "./jarvis-security-audit.js";
 import { runOpenRouterKeyAuditV1 } from "./openrouter-key-audit.js";
 import { applyJarvisResearchSystemV1 } from "./jarvis-research-system-v1.js";
-import { applyJarvisSeatConfigV1 } from "./jarvis-seat-config-v1.js";
+import { applyJarvisSeatConfigV1, modelRefOf } from "./jarvis-seat-config-v1.js";
 import { runJarvisResearchCommissioningV1 } from "./jarvis-research-commissioning.js";
 import { createSafety } from "./salem-safety.js";
+import { createMeter } from "./salem-meter.js";
+import { createOwnerApprovals, isLoopbackRequest } from "./salem-approvals.js";
 
 // Migrate deprecated CLAWDBOT_* env vars → OPENCLAW_* so existing Railway deployments
 // keep working. Users should update their Railway Variables to use the new names.
@@ -57,6 +59,25 @@ const SETUP_PASSWORD = process.env.SETUP_PASSWORD?.trim();
 // Separate machine credential for automated backup export.
 // Human/admin access continues to use SETUP_PASSWORD.
 const BACKUP_EXPORT_TOKEN = process.env.BACKUP_EXPORT_TOKEN?.trim();
+
+// D2 (2026-09-26): wrapper-only secrets never reach the gateway, its agents' shells, or
+// any CLI the wrapper runs. A stray `env` in an agent shell can then not leak the setup
+// password, the backup token or the private workspace seed into a chat or a transcript.
+const WRAPPER_ONLY_ENV = [
+  /^SETUP_PASSWORD$/,
+  /^BACKUP_EXPORT_TOKEN$/,
+  /^OPENCLAW_PRIVATE_WORKSPACE_SEED/,
+  /^JARVIS_SEED_/,
+  /^OPENCLAW_DEBUG_/,
+  /^WATCHDOG_/,
+];
+function childEnv(extra = {}) {
+  const env = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (!WRAPPER_ONLY_ENV.some((re) => re.test(k))) env[k] = v;
+  }
+  return { ...env, OPENCLAW_STATE_DIR: STATE_DIR, OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR, ...extra };
+}
 
 // Gateway admin token (protects OpenClaw gateway + Control UI).
 // Must be stable across restarts. If not provided via env, persist it in the state dir.
@@ -164,6 +185,56 @@ const WRAPPER_STARTED_AT = Date.now();
 let watchdogFailures = 0;
 let watchdogBusy = false;
 
+// Gateway RPC for wrapper jobs (meter, pin checks). Throws on failure; returns the result object.
+async function gatewayCallJson(method, params, timeoutMs = 90_000) {
+  const r = await runCmd(
+    OPENCLAW_NODE,
+    clawArgs(["gateway", "call", method, "--params", JSON.stringify(params ?? {}), "--json", "--timeout", String(Math.max(10_000, timeoutMs - 15_000))]),
+    { timeoutMs },
+  );
+  if (r.code !== 0) throw new Error(`${method} failed (exit ${r.code}): ${redactSecrets(String(r.output || "")).slice(0, 200)}`);
+  const text = String(r.output || "");
+  let data = null;
+  try { data = JSON.parse(text.trim()); } catch {
+    const at = text.search(/^\{/m);
+    if (at >= 0) { try { data = JSON.parse(text.slice(at).trim()); } catch {} }
+    if (!data) data = parseJsonFromOutput(text);
+  }
+  if (!data || typeof data !== "object") throw new Error(`${method}: unparseable output`);
+  return data.result ?? data;
+}
+
+function ownerWhatsAppE164() {
+  const fromEnv = process.env.JARVIS_WHATSAPP_OWNER_E164?.trim();
+  if (fromEnv) return fromEnv;
+  try {
+    const cfg = JSON.parse(fs.readFileSync(configPath(), "utf8"));
+    const list = cfg.channels?.whatsapp?.allowFrom;
+    return Array.isArray(list) ? list.find((x) => /^\+\d{6,}$/.test(String(x))) ?? null : null;
+  } catch { return null; }
+}
+
+// Salem AI smart meter (C3/C4/G2): numbers from OpenClaw's usage rollups and OpenRouter.
+const meter = createMeter({
+  stateDir: STATE_DIR,
+  workspaceDir: WORKSPACE_DIR,
+  dataDir: path.dirname(STATE_DIR),
+  gatewayCall: (method, params) => gatewayCallJson(method, params, 150_000),
+  sendWhatsApp: async (text) => {
+    const to = ownerWhatsAppE164();
+    if (!to) return { ok: false, error: "no owner WhatsApp number" };
+    if (!gatewayProc || safety.isLatched()) return { ok: false, error: "gateway not running" };
+    const r = await runCmd(OPENCLAW_NODE, clawArgs(["message", "send", "--channel", "whatsapp", "-t", to, "-m", text, "--json"]), { timeoutMs: 90_000 });
+    return r.code === 0 ? { ok: true } : { ok: false, error: redactSecrets(String(r.output || "")).slice(0, 200) };
+  },
+  sendTelegram: (text) => safety.sendTelegramText(text),
+  fuseStatus: () => safety.fuseStatus(),
+  spendSamples: () => safety.spendSamples(),
+  lineup: () => { try { return JSON.parse(fs.readFileSync(path.join(WORKSPACE_DIR, "reports", "lineup.json"), "utf8")); } catch { return null; } },
+  canQuery: () => Boolean(gatewayProc) && !safety.isLatched(),
+  log: console,
+});
+
 // Hard stop: SIGTERM, then SIGKILL if the gateway is still draining after hardAfterMs.
 async function stopGatewayProc({ hardAfterMs = 10_000 } = {}) {
   const child = gatewayProc;
@@ -239,11 +310,7 @@ async function startGateway() {
 
   gatewayProc = childProcess.spawn(OPENCLAW_NODE, clawArgs(args), {
     stdio: "inherit",
-    env: {
-      ...process.env,
-      OPENCLAW_STATE_DIR: STATE_DIR,
-      OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
-    },
+    env: childEnv(),
   });
 
   gatewayProc.on("error", (err) => {
@@ -449,28 +516,27 @@ function findKeyDeep(obj, name, depth = 0) {
 // for room work; on 2026-09-26 Counsel 1's room session was pinned to Gemini Flash
 // while the seat was configured as Opus 5.5. Clear such pins after the gateway is up.
 async function reconcileSeatSessionPinsV1() {
+  // v3 (2026-09-26): every session of every seat agent, not just agent:<id>:main.
+  // A session-level model pin left from an earlier setup (e.g. Salem's WhatsApp chat still
+  // pinned to Grok after Jarvis moved to Sol) silently overrides the seat's model; clear it.
+  // Test sessions are ignored. An owner pin that equals the seat's model is kept.
   let cfg;
   try { cfg = JSON.parse(fs.readFileSync(configPath(), "utf8")); } catch { return; }
-  const env = { ...process.env, OPENCLAW_STATE_DIR: STATE_DIR, OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR };
   const call = (method, params) => runCmd(
     OPENCLAW_NODE,
     clawArgs(["gateway", "call", method, "--params", JSON.stringify(params), "--json", "--timeout", "30000"]),
-    { env, timeoutMs: 40_000 },
+    { timeoutMs: 40_000 },
   );
-  const findRow = (obj, key, depth = 0) => {
-    if (!obj || typeof obj !== "object" || depth > 6) return null;
-    if (obj.key === key) return obj;
-    for (const v of Object.values(obj)) {
-      const r = findRow(v, key, depth + 1);
-      if (r) return r;
-    }
-    return null;
+  const collectRows = (obj, out = [], depth = 0) => {
+    if (!obj || typeof obj !== "object" || depth > 6) return out;
+    if (typeof obj.key === "string" && obj.key.startsWith("agent:")) { out.push(obj); return out; }
+    for (const v of Object.values(obj)) collectRows(v, out, depth + 1);
+    return out;
   };
   const report = [];
   for (const id of ["main", "forum-01", "forum-02", "forum-03", "counsel-01", "counsel-02", "counsel-03", "research-01", "research-02"]) {
-    const configured = cfg.agents?.entries?.[id]?.model;
+    const configured = modelRefOf(cfg.agents?.entries?.[id]?.model);
     if (!configured) continue;
-    const key = `agent:${id}:main`;
     try {
       const listed = await call("sessions.list", { agentId: id, limit: 500 });
       const data = parseJsonFromOutput(listed.output);
@@ -478,22 +544,27 @@ async function reconcileSeatSessionPinsV1() {
         report.push({ id, state: "unknown", code: listed.code, head: redactSecrets(String(listed.output || "")).slice(0, 160) });
         continue;
       }
-      const row = findRow(data, key);
-      if (!row) { report.push({ id, state: "no-room-session" }); continue; }
-      const model = row.modelOverride ?? findKeyDeep(row, "modelOverride");
-      const provider = row.providerOverride ?? findKeyDeep(row, "providerOverride");
-      const source = row.modelOverrideSource ?? findKeyDeep(row, "modelOverrideSource");
-      if (!model || source === "default") { report.push({ id, state: "follows-seat" }); continue; }
-      const m = String(model);
-      const pinned = provider && !m.startsWith(`${provider}/`) ? `${provider}/${m}` : m;
-      if (pinned === configured) { report.push({ id, state: "pinned-to-seat-model" }); continue; }
-      const r = await call("sessions.patch", { key, model: null });
-      report.push({ id, state: r.code === 0 ? "cleared" : "clear-failed", pinned, configured });
+      const rows = collectRows(data).filter((r) => r.key.startsWith(`agent:${id}:`) && !r.key.includes(":explicit:claude-test-"));
+      let cleared = 0; let kept = 0; let failed = 0;
+      for (const row of rows) {
+        const model = row.modelOverride ?? findKeyDeep(row, "modelOverride");
+        const provider = row.providerOverride ?? findKeyDeep(row, "providerOverride");
+        const source = row.modelOverrideSource ?? findKeyDeep(row, "modelOverrideSource");
+        if (!model || source === "default") continue;
+        const m = String(model);
+        const pinned = provider && !m.startsWith(`${provider}/`) ? `${provider}/${m}` : m;
+        if (pinned === configured) { kept += 1; continue; }
+        const r = await call("sessions.patch", { key: row.key, model: null });
+        if (r.code === 0) cleared += 1; else failed += 1;
+        console.log(`[seat-pins-v3] ${r.code === 0 ? "cleared" : "clear-failed"} ${row.key} pinned=${pinned} seat=${configured}`);
+      }
+      report.push({ id, sessions: rows.length, cleared, kept, failed });
     } catch (err) {
       report.push({ id, state: "error", error: redactSecrets(String(err)).slice(0, 160) });
     }
   }
-  console.log("[seat-pins-v2] " + JSON.stringify(report));
+  console.log("[seat-pins-v3] " + JSON.stringify(report));
+  return report;
 }
 
 function requireSetupAuth(req, res, next) {
@@ -523,6 +594,25 @@ function requireSetupAuth(req, res, next) {
 const app = express();
 app.disable("x-powered-by");
 app.use(express.json({ limit: "1mb" }));
+
+// D4 owner approvals (2026-09-26): see salem-approvals.js. Loopback callers only.
+const ownerApprovals = createOwnerApprovals({ send: (text) => safety.sendTelegramText(text) });
+function localOnly(req, res, next) {
+  if (!isLoopbackRequest(req)) return res.status(404).send("Not found");
+  return next();
+}
+app.post("/internal/owner-approval/request", localOnly, async (req, res) => {
+  const { kind, ref, summary } = req.body || {};
+  const r = await ownerApprovals.request(kind, ref, summary);
+  console.log(`[owner-approval-v1] request ${String(kind).slice(0, 40)}:${String(ref).slice(0, 80)} ${r.ok ? "sent" : r.error}`);
+  return res.status(r.ok ? 200 : r.status).json(r.ok ? { ok: true, sentTo: "owner's Telegram", expiresAt: r.expiresAt } : { ok: false, error: r.error });
+});
+app.post("/internal/owner-approval/verify", localOnly, (req, res) => {
+  const { kind, ref, code } = req.body || {};
+  const r = ownerApprovals.verify(kind, ref, code);
+  console.log(`[owner-approval-v1] verify ${String(kind).slice(0, 40)}:${String(ref).slice(0, 80)} ${r.ok ? "ok" : r.error}`);
+  return res.status(r.ok ? 200 : r.status).json(r.ok ? { ok: true } : { ok: false, error: r.error });
+});
 
 function requireSameOriginForAdminWrite(req, res, next) {
   if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") return next();
@@ -919,11 +1009,7 @@ function runCmd(cmd, args, opts = {}) {
 
     const proc = childProcess.spawn(cmd, args, {
       ...opts,
-      env: {
-        ...process.env,
-        OPENCLAW_STATE_DIR: STATE_DIR,
-        OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
-      },
+      env: childEnv(),
     });
 
     let out = "";
@@ -1265,6 +1351,16 @@ const ALLOWED_CONSOLE_COMMANDS = new Set([
   "alert.test",
   "openclaw.gateway.call",
   "test.turn",
+  "test.cleanup",
+  "meter.run",
+  "meter.state",
+  "report.daily.preview",
+  "report.daily.send",
+  "report.weekly.preview",
+  "report.weekly.send",
+  "privacy.check",
+  "pins.reconcile",
+  "disk.usage",
 
   // OpenClaw CLI helpers
   "openclaw.version",
@@ -1342,6 +1438,86 @@ app.post("/setup/api/console/run", requireSetupAuth, async (req, res) => {
       const r = await runCmd(OPENCLAW_NODE, clawArgs(args), { timeoutMs: (Math.min(1800, Number(spec.timeout) || 600) + 60) * 1000 });
       const out = redactSecrets(r.output || "");
       return res.status(200).json({ ok: r.code === 0, output: JSON.stringify({ code: r.code, wallMs: Date.now() - t0, output: out.length > 40_000 ? out.slice(0, 40_000) + "...(truncated)" : out }) });
+    }
+    if (cmd === "meter.run") {
+      const r = await meter.refreshLatest();
+      return res.json({ ok: true, output: JSON.stringify({ today: r.today.text, yesterday: r.yesterday.text, todayDay: { ...r.today.day, topTasks: undefined }, cacheStatus: r.today.day.cacheStatus, railway: r.today.railway }, null, 2) + "\n" });
+    }
+    if (cmd === "meter.state") {
+      return res.json({ ok: true, output: JSON.stringify(meter.state(), null, 2) + "\n" });
+    }
+    if (cmd === "report.daily.preview" || cmd === "report.daily.send") {
+      const date = /^\d{4}-\d{2}-\d{2}$/.test(arg) ? arg : new Date(Date.now() + 3 * 3600_000 - 86_400_000).toISOString().slice(0, 10);
+      const r = await meter.dailyReport(date);
+      const sent = cmd === "report.daily.send" ? await meter.deliver("daily-manual", r.text) : null;
+      return res.json({ ok: true, output: JSON.stringify({ date, text: r.text, sent, orCheck: r.orCheck, railway: r.railway }, null, 2) + "\n" });
+    }
+    if (cmd === "report.weekly.preview" || cmd === "report.weekly.send") {
+      const endDate = /^\d{4}-\d{2}-\d{2}$/.test(arg) ? arg : new Date(Date.now() + 3 * 3600_000 - 86_400_000).toISOString().slice(0, 10);
+      const r = await meter.weeklyReport(endDate);
+      let sent = null;
+      if (cmd === "report.weekly.send") {
+        sent = await meter.deliver("weekly-manual", r.text);
+        if (r.current.length) meter.saveModelsSnapshot(r.current);
+      }
+      return res.json({ ok: true, output: JSON.stringify({ endDate, text: r.text, sent, modelsListed: r.current.length }, null, 2) + "\n" });
+    }
+    if (cmd === "privacy.check") {
+      // D6: can every seat model be served by a provider that does not collect data?
+      // Two tiny requests per model (≈16 output tokens each): default routing vs data_collection "deny".
+      let lineup = null;
+      try { lineup = JSON.parse(fs.readFileSync(path.join(WORKSPACE_DIR, "reports", "lineup.json"), "utf8")); } catch {}
+      let cfgNow = {};
+      try { cfgNow = JSON.parse(fs.readFileSync(configPath(), "utf8")); } catch {}
+      const seatRefs = [lineup?.jarvis, ...(lineup?.jarvis?.fallbacks ?? []).map((m) => ({ model: m })), ...(lineup?.forum ?? []), ...(lineup?.counsel ?? []), ...(lineup?.research ?? [])]
+        .map((x) => x?.model).filter(Boolean);
+      const models = Array.from(new Set(seatRefs));
+      const results = [];
+      for (const ref of models) {
+        const id = ref.replace(/^openrouter\//, "");
+        const pinned = cfgNow.agents?.defaults?.models?.[ref]?.params?.provider ?? {};
+        const row = { model: id };
+        for (const [label, provider] of [["default", { ...pinned }], ["deny", { ...pinned, data_collection: "deny" }]]) {
+          try {
+            const body = { model: id, messages: [{ role: "user", content: "Reply with the single word OK." }], max_tokens: 16, usage: { include: true } };
+            if (Object.keys(provider).length) body.provider = provider;
+            const r = await safety.openRouterRequest("/chat/completions", { method: "POST", body });
+            row[label] = r.ok
+              ? { ok: true, provider: r.json?.provider ?? null, cost: r.json?.usage?.cost ?? null }
+              : { ok: false, status: r.status, error: String(r.json?.error?.message ?? "").slice(0, 200) };
+          } catch (err) {
+            row[label] = { ok: false, error: String(err).slice(0, 160) };
+          }
+        }
+        results.push(row);
+      }
+      return res.json({ ok: true, output: JSON.stringify(results, null, 2) + "\n" });
+    }
+    if (cmd === "pins.reconcile") {
+      const report = await reconcileSeatSessionPinsV1();
+      return res.json({ ok: true, output: JSON.stringify(report ?? null, null, 2) + "\n" });
+    }
+    if (cmd === "test.cleanup") {
+      // Remove commissioning test sessions (agent:<id>:explicit:claude-test-*) so they never
+      // enter memory search. Their cost stays recorded in the worklog.
+      const removed = [];
+      const failed = [];
+      for (const agentId of ["main", "forum-01", "forum-02", "forum-03", "counsel-01", "counsel-02", "counsel-03", "research-01", "research-02"]) {
+        let data = null;
+        try { data = await gatewayCallJson("sessions.list", { agentId, limit: 500 }, 60_000); } catch { continue; }
+        const keys = new Set();
+        const walk = (o, d = 0) => { if (!o || typeof o !== "object" || d > 6) return; if (typeof o.key === "string" && o.key.includes(":explicit:claude-test-")) keys.add(o.key); for (const v of Object.values(o)) walk(v, d + 1); };
+        walk(data);
+        for (const key of keys) {
+          try { await gatewayCallJson("sessions.delete", { key, agentId, deleteTranscript: true }, 60_000); removed.push(key); }
+          catch (err) { failed.push({ key, error: String(err).slice(0, 160) }); }
+        }
+      }
+      return res.json({ ok: failed.length === 0, output: JSON.stringify({ removed, failed }, null, 2) + "\n" });
+    }
+    if (cmd === "disk.usage") {
+      const r = await runCmd("bash", ["-c", "df -h / /data 2>/dev/null; echo; du -xh -d 3 /data 2>/dev/null | sort -h | tail -45"], { timeoutMs: 180_000 });
+      return res.json({ ok: r.code === 0, output: redactSecrets(String(r.output || "")).slice(0, 20_000) });
     }
     if (cmd === "openclaw.gateway.call") {
       // Narrow gateway RPC access for diagnostics. Reads only, plus clearing a session model pin.
@@ -2035,12 +2211,14 @@ function applyJarvisOperationalDefaults() {
       console.warn(`[config-backup-v1] failed: ${String(err)}`);
     }
 
-    // D5: the provider-level OpenRouter apiKey held a non-key placeholder that failed
-    // with 401. The working credential is the openrouter:default auth profile.
+    // Memory embeddings authenticate through the provider entry's auth-profile binding
+    // (apiKey "openrouter:default" = use the openrouter:default auth profile; see OpenClaw
+    // openai-compatible-embedding-provider.ts). R1 removed it by mistake and memory sync
+    // failed with 401; keep it bound. Chat models use the same profile either way.
     const orProvider = cfg.models?.providers?.openrouter;
-    if (orProvider && typeof orProvider.apiKey === "string" && !orProvider.apiKey.startsWith("sk-or-")) {
-      delete orProvider.apiKey;
-      console.log("[wrapper] removed stale non-key OpenRouter provider apiKey (auth profile remains)");
+    if (orProvider && !orProvider.apiKey) {
+      orProvider.apiKey = "openrouter:default";
+      console.log("[wrapper] restored OpenRouter provider auth-profile binding (memory embeddings)");
     }
 
     cfg.tools ??= {};
@@ -2129,14 +2307,14 @@ function applyJarvisOperationalDefaults() {
       if (cfg.plugins.load && Object.keys(cfg.plugins.load).length === 0) delete cfg.plugins.load;
     }
 
-    // Main Jarvis latency: Grok 4.7 is tool-capable but is not currently
-    // catalog-marked as a preferred Code Mode model, so global "auto" leaves
-    // the full coding/browser/gateway/messaging tool schemas in every provider
-    // request. Force generic Code Mode for this exact model only. This preserves
-    // the authorized tool catalog while deferring full schemas until actually
-    // needed, materially reducing ordinary WhatsApp prompt prefill.
-    cfg.agents.defaults.models["openrouter/x-ai/grok-4.7"] ??= {};
-    cfg.agents.defaults.models["openrouter/x-ai/grok-4.7"].codeMode = true;
+    // Code Mode (tool schemas deferred behind exec/wait, small prompt) is an agent-level
+    // choice for Jarvis only (set below). A model-level flag would also switch it on for
+    // any seat or researcher that runs the same model — e.g. the Verifier runs GPT-6 Sol
+    // like Jarvis, and Forum 1 runs Grok — whose tool policy denies "exec", the name of
+    // Code Mode's control tool. So model-level flags are removed here.
+    for (const modelCfg of Object.values(cfg.agents.defaults.models ?? {})) {
+      if (modelCfg && typeof modelCfg === "object" && "codeMode" in modelCfg) delete modelCfg.codeMode;
+    }
 
     // Capability policy: do not impose Jarvis-specific output-token ceilings.
     // Let each provider/model use its native output/reasoning capacity. Financial
@@ -2191,10 +2369,17 @@ function applyJarvisOperationalDefaults() {
     // Canonical user-selected model occupants/effort levels; Counsel 3 remains dormant until filled.
     applyJarvisSeatConfigV1({ cfg, stateDir: STATE_DIR, workspaceDir: WORKSPACE_DIR });
     // Keep Jarvis's prompt small on any model: defer full tool schemas behind Code Mode.
-    const jarvisModel = cfg.agents?.entries?.main?.model;
-    if (jarvisModel) {
-      cfg.agents.defaults.models[jarvisModel] ??= {};
-      cfg.agents.defaults.models[jarvisModel].codeMode = true;
+    // Code Mode: on for Jarvis whatever model it runs (fallback included); explicitly off for
+    // seats and researchers, which need their few tools directly.
+    if (cfg.agents?.entries?.main) {
+      cfg.agents.entries.main.tools ??= {};
+      cfg.agents.entries.main.tools.codeMode = true;
+    }
+    for (const id of ["forum-01", "forum-02", "forum-03", "counsel-01", "counsel-02", "counsel-03", "research-01", "research-02"]) {
+      const entry = cfg.agents?.entries?.[id];
+      if (!entry) continue;
+      entry.tools ??= {};
+      entry.tools.codeMode = false;
     }
 
     // One-line, non-secret policy diagnostic for the v2026.3.8 tool resolver.
@@ -2394,7 +2579,9 @@ function applyJarvisOperationalDefaults() {
           "- Plain chat: answer directly and briefly. No research or rooms for greetings, check-ins or simple questions.",
           "- If you are not sure of a fact, say so plainly instead of guessing. Check current facts (prices, news, who holds a role, rules) through research before stating them.",
           "- Web browsing is done by the research agents (research-01 Verifier, research-02 Scout), not by Jarvis.",
-          "- Seat models are changed only by the owner: `/model <provider/model> -a` inside that seat's chat, or `/config set agents.entries.<seat>.model=<provider/model>`. Never change seat models yourself. The current lineup is in /data/workspace/reports/lineup.json.",
+          "- Seat models are changed only by the owner, never by you. When he asks to switch a seat (e.g. \"put Opus 7 in Counsel 1\"), reply with the exact command for him to send: for Jarvis `/model <provider/model> -a` (keeps Jarvis's fallback); for a seat `/config set agents.entries.<seat-id>.model=<provider/model>` with seat ids forum-01, forum-02, forum-03, counsel-01, counsel-02, counsel-03, research-01 (Verifier), research-02 (Scout). Check the current lineup in /data/workspace/reports/lineup.json and warn if the switch puts two models from the same company in one room.",
+          "- Meter: when the owner says \"meter\" (or asks what Salem AI cost today or yesterday), read /data/workspace/reports/meter-latest.md and send its two blocks as they are. The numbers come from the wrapper's meter; never recompute or estimate them. If the file is missing or its Updated time is more than 3 hours old, say so.",
+          "- If you are running on your fallback model (a \"Model Fallback\" notice appeared, or your runtime model is not Jarvis's model in lineup.json), keep helping, but in Forum and Counsel act as clerk only (no view of your own, no synthesis) and tell the owner that Jarvis's primary model is unavailable.",
           finish,
         ].join("\n");
         let text = fs.readFileSync(agentsPath, "utf8");
@@ -2405,6 +2592,46 @@ function applyJarvisOperationalDefaults() {
       }
     } catch (err) {
       console.warn(`[answering-policy-v1] failed: ${String(err)}`);
+    }
+
+    // Seat-side copy of the owner's room protocol (2026-09-26), so every seat follows the same
+    // rules Jarvis runs (older seat rules mentioned automatic second passes).
+    try {
+      const begin = "<!-- salem-room-protocol-v1:begin -->";
+      const finish = "<!-- salem-room-protocol-v1:end -->";
+      const common = [
+        "- Give your own first answer independently. You never see other seats' answers before yours.",
+        "- A second pass happens only when Jarvis relays the owner's explicit command (for example \"debate\" or \"second round\"). Never start one yourself.",
+        "- Synthesize only when you are named as the synthesizer for this run; otherwise never merge the other seats' views.",
+        "- If evidence is missing, start your answer with `RESEARCH NEEDED: <question>` and continue with clearly marked assumptions. The research agents do the searching, not you.",
+        "- Say plainly when you are unsure.",
+      ];
+      const counselExtra = [
+        "- Counsel order: the research pack comes first; you may ask for more research (RESEARCH NEEDED); then your blind first answer. Afterwards Jarvis may send you the Forum answers, the Forum synthesis and all Counsel first answers — use them only for a second round the owner ordered.",
+      ];
+      for (const id of ["forum-01", "forum-02", "forum-03", "counsel-01", "counsel-02", "counsel-03"]) {
+        const entry = cfg.agents?.entries?.[id];
+        if (!entry) continue;
+        const dir = entry.workspace || path.join("/data/agent-workspaces", id);
+        const file = path.join(dir, "AGENTS.md");
+        if (!fs.existsSync(dir)) continue;
+        const block = [
+          begin,
+          "## Owner's room protocol (2026-09-26) — this overrides older rules in this file",
+          "",
+          ...common,
+          ...(id.startsWith("counsel-") ? counselExtra : []),
+          finish,
+        ].join("\n");
+        let text = "";
+        try { text = fs.readFileSync(file, "utf8"); } catch {}
+        const a = text.indexOf(begin);
+        const b = text.indexOf(finish);
+        const next = a >= 0 && b > a ? text.slice(0, a) + block + text.slice(b + finish.length) : (text.trimEnd() ? text.trimEnd() + "\n\n" : "") + block + "\n";
+        if (next !== text) fs.writeFileSync(file, next, { encoding: "utf8", mode: 0o600 });
+      }
+    } catch (err) {
+      console.warn(`[room-protocol-seat-v1] failed: ${String(err)}`);
     }
 
     fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
@@ -2492,11 +2719,6 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
     console.log(`[wrapper] running bootstrap: ${bootstrapPath}`);
     try {
       await runCmd("bash", [bootstrapPath], {
-        env: {
-          ...process.env,
-          OPENCLAW_STATE_DIR: STATE_DIR,
-          OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
-        },
         timeoutMs: 10 * 60 * 1000,
       });
       console.log("[wrapper] bootstrap complete");
@@ -2525,7 +2747,7 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
     const wdPath = new URL("./wrapper-watchdog.js", import.meta.url).pathname;
     const wd = childProcess.spawn(process.execPath, [wdPath], {
       stdio: "inherit",
-      env: { ...process.env, WATCHDOG_WRAPPER_PID: String(process.pid), WATCHDOG_PORT: String(PORT) },
+      env: childEnv({ WATCHDOG_WRAPPER_PID: String(process.pid), WATCHDOG_PORT: String(PORT) }),
     });
     wd.on("exit", (code) => console.warn(`[wrapper-watchdog-v1] exited code=${code}`));
   } catch (err) {
@@ -2537,6 +2759,13 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
   const fuseRun = () => safety.fuseTick({ stopGateway: () => stopGatewayProc({ hardAfterMs: 10_000 }) });
   setTimeout(() => { void fuseRun(); }, 60_000).unref?.();
   setInterval(() => { void fuseRun(); }, 5 * 60_000).unref?.();
+
+  // C3/C4/G2 meter: container sample every 5 min, meter-latest.md hourly, daily report 07:00
+  // Qatar (WhatsApp, Telegram fallback), weekly $/task report Sundays 07:05. First tick after 4 min.
+  setTimeout(() => {
+    void meter.tick();
+    setInterval(() => { void meter.tick(); }, 60_000).unref?.();
+  }, 4 * 60_000).unref?.();
 
   // B5: a latched (deliberate) stop survives container restarts and redeploys.
   const bootLatch = safety.latchInfo();
@@ -2553,7 +2782,7 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
       await ensureGatewayRunning();
       console.log("[wrapper] gateway ready");
       await runJarvisMainSessionRecoveryV1();
-      void reconcileSeatSessionPinsV1().catch((err) => console.warn(`[seat-pins-v2] failed: ${String(err)}`));
+      void reconcileSeatSessionPinsV1().catch((err) => console.warn(`[seat-pins-v3] failed: ${String(err)}`));
       launchOpenRouterKeyAuditV1();
       launchJarvisSecurityAuditV1();
       launchJarvisAgentSmokeV1();
@@ -2569,7 +2798,7 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
           await ensureGatewayRunning();
           console.log("[wrapper] gateway ready after retry");
           clearInterval(gatewayRetryTimer);
-          void reconcileSeatSessionPinsV1().catch((err) => console.warn(`[seat-pins-v1] failed: ${String(err)}`));
+          void reconcileSeatSessionPinsV1().catch((err) => console.warn(`[seat-pins-v3] failed: ${String(err)}`));
           launchJarvisSecurityAuditV1();
           launchJarvisAgentSmokeV1();
           launchJarvisAdviserMemoryCommissioningV1();

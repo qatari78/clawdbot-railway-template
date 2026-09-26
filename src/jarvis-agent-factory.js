@@ -253,13 +253,49 @@ function createPlan(agentId, agentClass, displayName, requestedTools) {
   return plan;
 }
 
-function approvePlan(planId, ownerConfirmed) {
+// D4 (2026-09-26): approval needs a one-time code that only the owner receives. The wrapper
+// (outside the gateway) sends the code straight to the owner's Telegram — never through a
+// chat session Jarvis can read — and verifies it. A model can no longer approve its own plan
+// by passing a flag.
+const WRAPPER_URL = `http://127.0.0.1:${process.env.PORT || "8080"}`;
+
+async function wrapperApproval(pathname, body) {
+  let res;
+  try {
+    res = await fetch(WRAPPER_URL + pathname, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(30_000),
+    });
+  } catch (err) {
+    fail("Owner-approval service unreachable: " + String(err?.message || err));
+  }
+  let json = null;
+  try { json = await res.json(); } catch {}
+  if (!res.ok || !json?.ok) fail(json?.error || `Owner-approval service refused (${res.status})`);
+  return json;
+}
+
+async function requestApproval(planId) {
   ensureDirs();
-  if (!ownerConfirmed) {
-    fail("Owner confirmation flag is required; approval must follow an explicit owner instruction naming this plan");
+  const p = planFile(planId);
+  if (!fs.existsSync(p)) fail("Unknown plan id");
+  const plan = JSON.parse(fs.readFileSync(p, "utf8"));
+  const summary = `create permanent agent "${plan.agentId}" (${plan.class}); tools allowed: ${(plan.tools?.allow ?? []).join(", ") || "none"}`;
+  const r = await wrapperApproval("/internal/owner-approval/request", { kind: "agent-factory", ref: planId, summary });
+  audit("approval-requested", { planId, agentId: plan.agentId });
+  return { planId, codeSentTo: r.sentTo, expiresAt: r.expiresAt, next: "Ask the owner to send you the code from his Telegram, then run: approve <plan-id> --code <code>" };
+}
+
+async function approvePlan(planId, code) {
+  ensureDirs();
+  if (typeof code !== "string" || !/^\d{6}$/.test(code.replace(/\D/g, ""))) {
+    fail("Approval needs the owner's 6-digit code: run request-approval <plan-id>, then approve <plan-id> --code <code>");
   }
   const p = planFile(planId);
   if (!fs.existsSync(p)) fail("Unknown plan id");
+  await wrapperApproval("/internal/owner-approval/verify", { kind: "agent-factory", ref: planId, code: code.replace(/\D/g, "") });
   const plan = JSON.parse(fs.readFileSync(p, "utf8"));
   const now = Date.now();
   const approval = {
@@ -480,7 +516,7 @@ function skillText() {
     "## Approval boundary",
     "",
     "- You may create a factory PLAN without owner approval.",
-    "- Never approve or apply a plan unless the owner explicitly approves that exact plan ID in the current conversation.",
+    "- Approval needs the owner's one-time code: run request-approval; the code goes straight to the owner's Telegram (you never see it). Only the owner can give it to you. Never guess or ask for it more than once per plan.",
     "- Approval is single-use and expires after 30 minutes.",
     "- Do not interpret silence, prior general enthusiasm, or an unrelated approval as approval of a new plan.",
     "",
@@ -499,7 +535,8 @@ function skillText() {
     "## Commands",
     "",
     "Plan: node /app/src/jarvis-agent-factory.js plan <agent-id> <adviser|research|operator> [--name <display-name>] [--allow <tool1,tool2>]",
-    "Approve after explicit owner approval: node /app/src/jarvis-agent-factory.js approve <plan-id> --owner-confirmed",
+    "Request the owner's code: node /app/src/jarvis-agent-factory.js request-approval <plan-id>",
+    "Approve with the code the owner sends you: node /app/src/jarvis-agent-factory.js approve <plan-id> --code <6 digits>",
     "Apply: node /app/src/jarvis-agent-factory.js apply <plan-id>",
     "Inspect: node /app/src/jarvis-agent-factory.js status <plan-id>",
     "",
@@ -535,10 +572,17 @@ async function main(argv) {
     return;
   }
 
+  if (command === "request-approval") {
+    const planId = positional[1];
+    if (!planId) fail("Usage: request-approval <plan-id>");
+    process.stdout.write(JSON.stringify(await requestApproval(planId), null, 2) + "\n");
+    return;
+  }
+
   if (command === "approve") {
     const planId = positional[1];
-    if (!planId) fail("Usage: approve <plan-id> --owner-confirmed");
-    const approval = approvePlan(planId, options["owner-confirmed"] === true);
+    if (!planId) fail("Usage: approve <plan-id> --code <code>");
+    const approval = await approvePlan(planId, typeof options.code === "string" ? options.code : "");
     process.stdout.write(JSON.stringify(approval, null, 2) + "\n");
     return;
   }
@@ -558,7 +602,7 @@ async function main(argv) {
     return;
   }
 
-  fail("Commands: plan, approve, apply, status");
+  fail("Commands: plan, request-approval, approve, apply, status");
 }
 
 const isCli =

@@ -110,6 +110,28 @@ export function createSafety({ stateDir, configPath, log = console, fetchImpl = 
     return { ok, error };
   }
 
+  // Plain owner message on Telegram (daily/weekly reports when WhatsApp is unavailable).
+  async function sendTelegramText(text) {
+    const { token, chatId } = alertTarget();
+    if (!token || !chatId) return { ok: false, error: "no-telegram-target" };
+    const parts = [];
+    for (let s = String(text); s.length > 0; s = s.slice(3900)) parts.push(s.slice(0, 3900));
+    try {
+      for (const part of parts) {
+        const res = await fetchImpl(`https://api.telegram.org/bot${token}/sendMessage`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ chat_id: chatId, text: part, disable_web_page_preview: true }),
+          signal: AbortSignal.timeout(15_000),
+        });
+        if (!res.ok) return { ok: false, error: `telegram-http-${res.status}` };
+      }
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: String(err).slice(0, 120) };
+    }
+  }
+
   // ---- B3 money fuse ---------------------------------------------------------------
   const thresholds = () => ({
     alertPerHour: num(process.env.JARVIS_FUSE_ALERT_USD_PER_HOUR, 5),
@@ -125,6 +147,21 @@ export function createSafety({ stateDir, configPath, log = console, fetchImpl = 
     cachedKey = r.key;
     cachedKeyAt = Date.now();
     return cachedKey;
+  }
+
+  // Authenticated OpenRouter request with the working key (privacy routing checks).
+  async function openRouterRequest(pathname, { method = "GET", body } = {}) {
+    const key = await openRouterKey();
+    if (!key) throw new Error("no working OpenRouter key found");
+    const res = await fetchImpl(`https://openrouter.ai/api/v1${pathname}`, {
+      method,
+      headers: { Authorization: `Bearer ${key}`, "content-type": "application/json", "X-OpenRouter-Title": "Salem AI commissioning" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(120_000),
+    });
+    let json = null;
+    try { json = await res.json(); } catch {}
+    return { status: res.status, ok: res.ok, json };
   }
 
   async function orGet(pathname, key) {
@@ -203,8 +240,10 @@ export function createSafety({ stateDir, configPath, log = console, fetchImpl = 
 
   return {
     latchInfo, isLatched, setLatch, clearLatch,
-    sendAlert, alertTarget: () => { const a = alertTarget(); return { hasToken: Boolean(a.token), chatId: a.chatId ? "set" : null }; },
+    sendAlert, sendTelegramText, alertTarget: () => { const a = alertTarget(); return { hasToken: Boolean(a.token), chatId: a.chatId ? "set" : null }; },
     fuseTick, fuseStatus: () => ({ ...fuse, thresholds: thresholds() }),
+    spendSamples: () => readJson(spendPath, { samples: [] }).samples || [],
+    openRouterRequest,
     restartBudget, recordRestart,
   };
 }
