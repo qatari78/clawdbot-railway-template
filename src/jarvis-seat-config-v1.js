@@ -63,6 +63,27 @@ export function applyJarvisSeatConfigV1({ cfg }) {
 
   for (const [id, spec] of Object.entries(assignments)) setSeat(cfg, id, spec);
 
+  // C2 output envelopes: 2x the largest observed 7-day output, with a 32k floor.
+  // The 2026-09-26 census put every active seat on the 32k floor; each current
+  // model's supported output ceiling is above this value.
+  const C2_OUTPUT_ENVELOPE_TOKENS = 32_000;
+  const c2EnvelopeAgents = [
+    "main",
+    "forum-01",
+    "forum-02",
+    "forum-03",
+    "counsel-01",
+    "counsel-02",
+    "research-01",
+    "research-02",
+  ];
+  for (const id of c2EnvelopeAgents) {
+    const entry = cfg.agents.entries?.[id];
+    if (!entry) continue;
+    entry.params ??= {};
+    entry.params.maxTokens = C2_OUTPUT_ENVELOPE_TOKENS;
+  }
+
   // Keep the default primary aligned with Jarvis/main so any ordinary implicit
   // main-agent run cannot silently fall back to a stale model assignment.
   cfg.agents.defaults.model ??= {};
@@ -117,6 +138,7 @@ export function applyJarvisSeatConfigV1({ cfg }) {
     counsel01: assignments["counsel-01"],
     counsel02: assignments["counsel-02"],
     counsel03Active,
+    c2OutputEnvelopeTokens: C2_OUTPUT_ENVELOPE_TOKENS,
   }));
 
   return { applied: true, assignments, counsel03Active };
