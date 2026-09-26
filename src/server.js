@@ -2635,6 +2635,24 @@ function applyJarvisOperationalDefaults() {
       console.log("[privacy-routing-v1] " + JSON.stringify({ dataCollection: routing.data_collection ?? "provider-default" }));
     }
 
+    // R16 (2026-09-26): Jarvis works in the owner's workspace (WORKSPACE_DIR: AGENTS.md policies,
+    // USER.md, MEMORY.md, memory/, skills/ with jarvis-rooms and the research skills). The
+    // multi-agent scaffold set agents.ownership "explicit" (21 Sep) without pinning main's
+    // workspace, so OpenClaw resolves main to <agents.defaults.workspace>/main — a template
+    // workspace it created on 21 Sep with none of those files or skills. Sessions created before
+    // kept the owner's workspace; every new session (tests, resets, new chats) got the template:
+    // no room skills, no owner policies, no USER.md or MEMORY.md.
+    {
+      const mainEntry = cfg.agents?.entries?.main;
+      if (mainEntry && !mainEntry.workspace) {
+        mainEntry.workspace = WORKSPACE_DIR;
+        console.log(`[workspace-pin-v1] Jarvis (main) workspace pinned to ${WORKSPACE_DIR}`);
+      }
+      // The owner's AGENTS.md is ~20.5k characters; OpenClaw's default per-file cap (20k) would
+      // cut its middle down to a digest.
+      if (mainEntry && !(Number(mainEntry.bootstrapMaxChars) >= 32_000)) mainEntry.bootstrapMaxChars = 32_000;
+    }
+
     cfg.tools ??= {};
     // Remove stale legacy explicit allowlists. They override profile resolution and
     // can make leaf adviser agents fail before the model is called.
