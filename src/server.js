@@ -2947,6 +2947,21 @@ function applyJarvisOperationalDefaults() {
       cfg.channels.telegram.dmPolicy = "allowlist";
       cfg.channels.telegram.allowFrom = Array.from(new Set(ownerTelegramIds));
     }
+    // R17c (26 Sep): the command allowlist mirrors these owner-only lists, so the owner's plain
+    // words "fresh chat" are authorized like /new. Without it WhatsApp and Telegram authorize only
+    // messages that look like slash commands: at 16:13Z Salem's "Fresh chat" reached the model
+    // (Jarvis answered "Fresh start…") but the chat was not reset. Same person, same lists — the
+    // owner's /stop, /model etc. keep working; owner-only commands still check ownerAllowFrom.
+    {
+      const commandLists = {};
+      if (ownerWa) commandLists.whatsapp = [ownerWa];
+      if (ownerTelegramIds.length > 0) commandLists.telegram = Array.from(new Set(ownerTelegramIds));
+      if (Object.keys(commandLists).length) {
+        const prev = cfg.commands.allowFrom && typeof cfg.commands.allowFrom === "object" && !Array.isArray(cfg.commands.allowFrom) ? cfg.commands.allowFrom : {};
+        cfg.commands.allowFrom = { ...prev, ...commandLists };
+      }
+      console.log("[owner-commands-v1] " + JSON.stringify({ commandAllowFrom: Object.fromEntries(Object.entries(cfg.commands.allowFrom ?? {}).map(([k, v]) => [k, Array.isArray(v) ? v.length : 0])) }));
+    }
     console.log("[owner-only-v1] " + JSON.stringify({
       whatsappDm: cfg.channels.whatsapp.dmPolicy,
       whatsappAllow: (cfg.channels.whatsapp.allowFrom || []).length,
