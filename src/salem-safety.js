@@ -208,7 +208,11 @@ export function createSafety({ stateDir, configPath, log = console, fetchImpl = 
       const dailyAvg = fuse.usageWeekly != null ? fuse.usageWeekly / 7 : null;
       fuse.runwayDays = fuse.balance != null && dailyAvg && dailyAvg > 0 ? fuse.balance / dailyAvg : null;
 
-      if (fuse.spend60 > t.stopPerHour) {
+      const alreadyStopped = !t.dryRun && latchInfo()?.reason === "money-fuse";
+      if (fuse.spend60 > t.stopPerHour && alreadyStopped) {
+        // Already stopped by the fuse: stay quiet (one alert per stop, not one every 5 minutes).
+        fuse.tripped = true;
+      } else if (fuse.spend60 > t.stopPerHour) {
         const msg = `${tag}MONEY FUSE: $${fuse.spend60.toFixed(2)} spent in the last hour (limit $${t.stopPerHour}). ` +
           (t.dryRun ? "Dry run — Jarvis NOT stopped." : "Jarvis has been STOPPED and will stay stopped until restarted from /setup.");
         if (!t.dryRun) {
