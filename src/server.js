@@ -230,6 +230,7 @@ const meter = createMeter({
   stateDir: STATE_DIR,
   workspaceDir: WORKSPACE_DIR,
   dataDir: path.dirname(STATE_DIR),
+  researchRunsDir: researchPaths().runs, // R14: research-runner cost counts in the meter
   gatewayCall: (method, params) => gatewayCallJson(method, params, 150_000),
   sendWhatsApp: async (text) => {
     const to = ownerWhatsAppE164();
@@ -1853,6 +1854,7 @@ app.post("/setup/api/console/run", requireSetupAuth, async (req, res) => {
         comparison_scope: "OpenRouter's own model page or API first.",
         stakes: "commissioning test only (low)",
         freshness: "current",
+        test: true, // R14: the meter leaves this run out of the owner's spend
         exclusions: ["No recommendation.", "No private or logged-in pages."],
       }, null, 2), { mode: 0o600 });
       const t0 = Date.now();

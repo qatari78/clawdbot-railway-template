@@ -160,3 +160,32 @@ test("R13: the daily report shows no days estimate in a commissioning week", () 
   assert.match(renderDaily({ ...base, balance: { balance: 18.5, runwayDays: 1.5, commissioning: true } }), /OpenRouter balance: \$18\.5 \(no days estimate this week: its spend includes the commissioning tests\)/);
   assert.match(renderDaily({ ...base, balance: { balance: 18.5, runwayDays: 21.4 } }), /OpenRouter balance: \$18\.5 \(~21 days at this week's rate\)/);
 });
+
+test("R14: research-runner cost is charged like session cost (by seat, by time, tests skipped)", async () => {
+  const { researchRunsRows } = await import("../src/salem-meter.js");
+  const run = (finished, over = {}) => ({
+    finished_at: finished, total_cost_usd: 0.3,
+    telemetry: [{ researcher: "verifier", model: "openai/gpt-6-sol", usage: { cost: 0.2 } }, { researcher: "scout", model: "deepseek/x", attempts: 2, usage: { cost: 0.05 } }],
+    ...over,
+  });
+  const rows = researchRunsRows([
+    run("2026-09-25T09:10:00Z"),
+    run("2026-09-25T09:20:00Z", { test: true }),        // research.test → skipped
+    run("2026-09-26T09:10:00Z"),                         // outside the window
+  ], start, start + 24 * 3600 * 1000);
+  const byId = Object.fromEntries(rows.map((r) => [r.agentId, r]));
+  assert.deepEqual(Object.keys(byId).sort(), ["research-01", "research-02", "research-checks"]);
+  const cost = (r) => r.usage.utcQuarterHourTokenUsage.reduce((s, b) => s + b.totalCost, 0);
+  assert.equal(Math.round(cost(byId["research-01"]) * 1000), 200);
+  assert.equal(Math.round(cost(byId["research-02"]) * 1000), 50);
+  assert.equal(Math.round(cost(byId["research-checks"]) * 1000), 50);
+  assert.equal(byId["research-02"].usage.modelUsage[0].count, 2);
+
+  // An owner message at 09:00Z; the research finished at 09:10Z → charged to that task.
+  const owner = session("agent:main:whatsapp:direct:+97400000000", "main", { costs: [["2026-09-25T09:00:00Z", 0.1]], users: [["2026-09-25T09:00:00Z", 1]], assistant: 1, models: [["openai/gpt-6-sol", 1, 0.1]] });
+  const d = computeDay({ sessions: [owner, ...rows] }, { windowStart: start, windowEnd: start + 24 * 3600 * 1000 });
+  assert.equal(d.taskCount, 1);
+  assert.equal(Math.round(d.totalCost * 1000), 400);
+  assert.equal(Math.round(d.perTask.median * 1000), 400);
+  assert.equal(Math.round(d.rooms.Research * 1000), 300);
+});

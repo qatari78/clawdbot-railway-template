@@ -314,6 +314,7 @@ export async function runResearchBrief({brief,level="dual",ledgerBriefId=null}){
   const totalCost=researchCost+supportCost;
   const summary={
     schema:"jarvis-research-run-v1.1",run_id:runId,brief_id:targetBriefId,task_brief_id:normalized.brief_id,level,
+    ...(normalized.test===true?{test:true}:{}),
     ledger_brief_id:ledgerBriefId||null,
     started_at:normalized.commissioned_at,finished_at:new Date().toISOString(),pass,partial,failures,check_errors:checkErrors,
     packets,telemetry,total_cost_usd:totalCost,failed_attempt_cost_usd:failedAttemptCost,

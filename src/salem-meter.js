@@ -214,6 +214,50 @@ export function computeDay(result, { windowStart, windowEnd, includeTests = fals
   };
 }
 
+// R14: the research runner calls OpenRouter directly, outside OpenClaw's sessions, so session
+// usage misses it (26 Sep: $0.25–0.85 per dual run). Synthetic usage rows built from the runner's
+// run records let computeDay charge that cost like any other: by time, to the owner's message it
+// served (or to commissioning tests on a marked day). One row per research seat — research-01
+// (Verifier), research-02 (Scout) — plus "research-checks" (support checks, failed attempts).
+// Runs marked test are skipped.
+export function researchRunsRows(runs, windowStart, windowEnd) {
+  const seatOf = (who) => (who === "verifier" ? "research-01" : who === "scout" ? "research-02" : "research-checks");
+  const rows = new Map(); // agentId -> { buckets, models, count }
+  const add = (agentId, t, model, cost, calls) => {
+    if (!(cost > 0)) return;
+    const r = rows.get(agentId) || { buckets: new Map(), models: new Map(), count: 0 };
+    const date = new Date(t).toISOString().slice(0, 10);
+    const k = `${date}|${Math.floor((t - Date.parse(`${date}T00:00:00Z`)) / QUARTER)}`;
+    r.buckets.set(k, (r.buckets.get(k) || 0) + cost);
+    const m = r.models.get(model) || { count: 0, cost: 0 };
+    m.count += calls; m.cost += cost; r.models.set(model, m);
+    r.count += calls;
+    rows.set(agentId, r);
+  };
+  for (const s of runs || []) {
+    if (!s || s.test === true) continue;
+    const t = Date.parse(s.finished_at);
+    const total = Number(s.total_cost_usd) || 0;
+    if (!Number.isFinite(t) || t < windowStart || t >= windowEnd || total <= 0) continue;
+    let modelled = 0;
+    for (const x of s.telemetry || []) {
+      const c = Number(x?.usage?.cost) || 0;
+      modelled += c;
+      add(seatOf(x?.researcher), t, String(x?.model || "?"), c, Number(x?.attempts) || 1);
+    }
+    if (total - modelled > 0.0005) add("research-checks", t, "support checks and failed attempts", total - modelled, 1);
+  }
+  return [...rows].map(([agentId, r]) => ({
+    key: `agent:${agentId}:runner`,
+    agentId,
+    usage: {
+      utcQuarterHourTokenUsage: [...r.buckets].map(([k, totalCost]) => { const [date, q] = k.split("|"); return { date, quarterIndex: Number(q), totalCost }; }),
+      modelUsage: [...r.models].map(([model, m]) => ({ provider: "openrouter", model, count: m.count, totals: { totalCost: m.cost } })),
+      messageCounts: { assistant: r.count, toolCalls: 0, errors: 0, user: 0 },
+    },
+  }));
+}
+
 // OpenRouter's own spend in [start, end) from cumulative key-usage samples.
 export function openRouterSpend(samples, start, end) {
   const list = (samples || []).filter((s) => Number.isFinite(s?.t) && Number.isFinite(s?.usage)).sort((a, b) => a.t - b.t);
@@ -356,7 +400,7 @@ export function renderWeekly({ startDate, endDate, week, perSeat, scout, lineup 
 
 // ---- I/O shell -----------------------------------------------------------------------
 
-export function createMeter({ stateDir, workspaceDir, dataDir = "/data", gatewayCall, sendWhatsApp, sendTelegram, fuseStatus, spendSamples, lineup, canQuery = () => true, log = console, fetchImpl = fetch }) {
+export function createMeter({ stateDir, workspaceDir, dataDir = "/data", researchRunsDir = null, gatewayCall, sendWhatsApp, sendTelegram, fuseStatus, spendSamples, lineup, canQuery = () => true, log = console, fetchImpl = fetch }) {
   const statePath = path.join(stateDir, "salem-meter-state.json");
   const modelsSnapshotPath = path.join(stateDir, "salem-openrouter-models.json");
   const reportsDir = path.join(workspaceDir, "reports");
@@ -421,9 +465,32 @@ export function createMeter({ stateDir, workspaceDir, dataDir = "/data", gateway
   const testLedgerPath = path.join(stateDir, "meter-test-sessions.json");
   const readTestLedger = () => { try { return JSON.parse(fs.readFileSync(testLedgerPath, "utf8")); } catch { return { ids: [], days: [] }; } };
 
+  // R14: run records of the research runner that finished in [windowStart, windowEnd).
+  function researchRuns(windowStart, windowEnd) {
+    if (!researchRunsDir) return [];
+    const runs = [];
+    try {
+      for (const f of fs.readdirSync(researchRunsDir)) {
+        if (!f.endsWith(".json")) continue;
+        const p = path.join(researchRunsDir, f);
+        try {
+          if (fs.statSync(p).mtimeMs < windowStart) continue; // written when the run finished
+          const s = JSON.parse(fs.readFileSync(p, "utf8"));
+          const t = Date.parse(s?.finished_at);
+          if (Number.isFinite(t) && t >= windowStart && t < windowEnd) runs.push(s);
+        } catch {}
+      }
+    } catch {}
+    return runs;
+  }
+
   async function day(dateStr) {
     const windowStart = qatarDayStartMs(dateStr);
-    const res = await usageFor(dateStr, dateStr);
+    let res = await usageFor(dateStr, dateStr);
+    try {
+      const extra = researchRunsRows(researchRuns(windowStart, windowStart + DAY), windowStart, windowStart + DAY);
+      if (extra.length) res = { ...(res || {}), sessions: [...(res?.sessions ?? []), ...extra] };
+    } catch (err) { log.warn?.("[meter] research runs not counted: " + String(err).slice(0, 120)); }
     const d = computeDay(res, { windowStart, windowEnd: windowStart + DAY, isTest: testMatcher(readTestLedger()) });
     d.cacheStatus = res?.cacheStatus?.status ?? null;
     return d;
@@ -482,9 +549,14 @@ export function createMeter({ stateDir, workspaceDir, dataDir = "/data", gateway
 
   async function weeklyReport(endDate) {
     const startDate = addDays(endDate, -6);
-    const res = await usageFor(startDate, endDate);
+    let res = await usageFor(startDate, endDate);
     const windowStart = qatarDayStartMs(startDate);
-    const week = computeDay(res, { windowStart, windowEnd: qatarDayStartMs(endDate) + DAY, isTest: testMatcher(readTestLedger()) });
+    const windowEnd = qatarDayStartMs(endDate) + DAY;
+    try {
+      const extra = researchRunsRows(researchRuns(windowStart, windowEnd), windowStart, windowEnd);
+      if (extra.length) res = { ...(res || {}), sessions: [...(res?.sessions ?? []), ...extra] };
+    } catch (err) { log.warn?.("[meter] research runs not counted: " + String(err).slice(0, 120)); }
+    const week = computeDay(res, { windowStart, windowEnd, isTest: testMatcher(readTestLedger()) });
     const lu = lineup() || {};
     const seats = [
       ...(lu.jarvis ? [lu.jarvis] : []),
