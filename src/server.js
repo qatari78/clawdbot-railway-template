@@ -370,11 +370,11 @@ async function runJarvisMainSessionRecoveryV1() {
       },
     );
     const output = redactSecrets(r.output || "").trim();
-    record = { version: 2, startedAt, finishedAt: new Date().toISOString(), ok: true, output };
+    record = { version: 1, startedAt, finishedAt: new Date().toISOString(), ok: true, output };
     console.log("[main-session-recovery-v1] reset completed " + JSON.stringify(record));
   } catch (err) {
     record = {
-      version: 2,
+      version: 1,
       startedAt,
       finishedAt: new Date().toISOString(),
       ok: false,
@@ -1164,7 +1164,7 @@ async function runB8MemoryDiagnosticV1() {
     ]);
 
     const result = {
-      version: 2,
+      version: 1,
       startedAt,
       finishedAt: new Date().toISOString(),
       modelTurnSubmitted: 0,
@@ -1660,7 +1660,7 @@ async function runC2OutputEnvelopeDiagnosticV1() {
     }
 
     const result = {
-      version: 2,
+      version: 1,
       generatedAt: new Date().toISOString(),
       windowDays: 7,
       cutoffAt: new Date(cutoffMs).toISOString(),
