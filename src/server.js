@@ -1638,6 +1638,25 @@ app.post("/setup/api/console/run", requireSetupAuth, async (req, res) => {
         const r3 = await call([sys, { role: "user", content: U1 }, a1, { role: "user", content: U2 }, a2, { role: "user", content: m ? mark("Reply with just: three") : "Reply with just: three" }, { role: "user", content: carrier(3) }]);
         results[variant] = { r1, r2, r3 };
       }
+      // Same layout as OpenClaw's marker policy with tools: last tool marked, tool round with
+      // a marked tool result. Checks that the route accepts markers on tools and tool results.
+      {
+        const tag = `tools-${nonce}`;
+        const tools = [
+          { type: "function", function: { name: "exec", description: "Run a short program.", parameters: { type: "object", properties: { code: { type: "string" } }, required: ["code"] } } },
+          { type: "function", function: { name: "wait", description: "Wait for a pending run.", parameters: { type: "object", properties: { runId: { type: "string" } }, required: ["runId"] } }, cache_control: { type: "ephemeral" } },
+        ];
+        const sys = { role: "system", content: mark(`${S}\nvariant ${tag}`) };
+        const callT = async (messages) => {
+          const r = await safety.openRouterRequest("/chat/completions", { method: "POST", body: { model, messages, tools, max_tokens: 16, provider: { data_collection: "deny" }, usage: { include: true } } });
+          const u = r.json?.usage ?? {};
+          return { status: r.status, prompt: u.prompt_tokens, cached: u.prompt_tokens_details?.cached_tokens ?? null, write: u.prompt_tokens_details?.cache_write_tokens ?? null, cost: u.cost ?? null, err: r.ok ? undefined : JSON.stringify(r.json ?? {}).slice(0, 300) };
+        };
+        const r1 = await callT([sys, { role: "user", content: mark(U1) }, { role: "user", content: carrier(1) }]);
+        const call = { id: "call_probe_1", type: "function", function: { name: "exec", arguments: "{\"code\":\"1+1\"}" } };
+        const r2 = await callT([sys, { role: "user", content: U1 }, { role: "assistant", content: null, tool_calls: [call] }, { role: "tool", tool_call_id: "call_probe_1", content: mark("2") }, { role: "user", content: carrier(2) }]);
+        results.tools = { r1, r2 };
+      }
       return res.json({ ok: true, output: JSON.stringify({ model, results }, null, 2) + "\n" });
     }
     if (cmd === "wrapper.info") {
