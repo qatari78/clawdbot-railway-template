@@ -18,6 +18,8 @@ import { applyJarvisResearchSystemV1 } from "./jarvis-research-system-v1.js";
 import { applyJarvisSeatConfigV1, modelRefOf } from "./jarvis-seat-config-v1.js";
 import { runJarvisResearchCommissioningV1 } from "./jarvis-research-commissioning.js";
 import { createSafety } from "./salem-safety.js";
+import { createPeers } from "./salem-peers.js";
+import { findGatewayPids, processAlive } from "./salem-procs.js";
 import { createMeter } from "./salem-meter.js";
 import { createOwnerApprovals, isLoopbackRequest } from "./salem-approvals.js";
 
@@ -181,10 +183,18 @@ let lastDoctorAt = null;
 
 // Salem AI safety net (Claude, 2026-09-26): stop latch, owner alerts, money fuse, watchdog budget.
 const safety = createSafety({ stateDir: STATE_DIR, configPath: configPath(), log: console });
+// R8: other copies of this wrapper on the same volume (deploy overlap, leftover failed release).
+const peers = createPeers({ stateDir: STATE_DIR, log: console });
 const WRAPPER_STARTED_AT = Date.now();
 let watchdogFailures = 0;
 let watchdogBusy = false;
-let watchdogTestNote = null; // set by gateway.crash-test so the restart alert says it was a test
+let watchdogTest = false; // set by gateway.crash-test: the next watchdog restart is a silent, uncounted test
+let gatewayLifecycleBusy = false; // a deliberate stop/restart is in progress; the watchdog stays out of it
+let restoreInProgress = false; // backup import: nothing may start the gateway until the files are in place
+const GATEWAY_SETTLE_MS = 8_000; // a start counts only if the new gateway process is still up after this
+let bootStartPending = false; // boot start (or its retries) still owns bringing the gateway up
+let untrackedLogged = false;
+const isStandby = () => peers.status(Boolean(gatewayProc)).standby;
 
 // Gateway RPC for wrapper jobs (meter, pin checks). Throws on failure; returns the result object.
 async function gatewayCallJson(method, params, timeoutMs = 90_000) {
@@ -236,18 +246,44 @@ const meter = createMeter({
   log: console,
 });
 
-// Hard stop: SIGTERM, then SIGKILL if the gateway is still draining after hardAfterMs.
+// Hard stop: SIGTERM, then SIGKILL if the gateway is still draining after hardAfterMs (OpenClaw
+// otherwise drains for up to ~5 minutes and keeps its lock, so a new gateway cannot start).
+// R8: waits until the process is really gone, and also stops gateway processes the wrapper is
+// not tracking, so "stop" always means stopped (owner stop, money fuse, restart, import).
 async function stopGatewayProc({ hardAfterMs = 10_000 } = {}) {
   const child = gatewayProc;
-  if (!child) return false;
-  await new Promise((resolve) => {
-    let settled = false;
-    const finish = () => { if (!settled) { settled = true; resolve(); } };
-    child.once("exit", finish);
-    try { child.kill("SIGTERM"); } catch { finish(); }
-    setTimeout(() => { try { child.kill("SIGKILL"); } catch {} setTimeout(finish, 1_000); }, hardAfterMs).unref?.();
-  });
+  let stopped = false;
+  if (child && child.exitCode === null && child.signalCode === null) {
+    await new Promise((resolve) => {
+      let settled = false;
+      const finish = () => { if (!settled) { settled = true; resolve(); } };
+      child.once("exit", finish);
+      try { child.kill("SIGTERM"); } catch { finish(); }
+      setTimeout(() => { try { child.kill("SIGKILL"); } catch {} setTimeout(finish, 2_000); }, hardAfterMs).unref?.();
+    });
+    stopped = true;
+  }
   if (gatewayProc === child) gatewayProc = null;
+  if (await killStrayGateways({ hardAfterMs })) stopped = true;
+  peers.beat(Boolean(gatewayProc));
+  return stopped;
+}
+
+// Gateway processes in this container that the wrapper is not tracking.
+function strayGatewayPids() {
+  return findGatewayPids({ port: INTERNAL_GATEWAY_PORT, excludePids: gatewayProc?.pid ? [gatewayProc.pid] : [] });
+}
+
+async function killStrayGateways({ hardAfterMs = 10_000 } = {}) {
+  const pids = strayGatewayPids();
+  if (!pids.length) return false;
+  console.warn(`[gateway] stopping ${pids.length} untracked gateway process(es): ${pids.join(", ")}`);
+  for (const pid of pids) { try { process.kill(pid, "SIGTERM"); } catch {} }
+  const deadline = Date.now() + hardAfterMs;
+  while (Date.now() < deadline && pids.some((pid) => processAlive(pid))) await sleep(250);
+  for (const pid of pids) { if (processAlive(pid)) { try { process.kill(pid, "SIGKILL"); } catch {} } }
+  const until = Date.now() + 3_000;
+  while (Date.now() < until && pids.some((pid) => processAlive(pid))) await sleep(100);
   return true;
 }
 
@@ -267,8 +303,12 @@ function sleep(ms) {
 
 async function waitForGatewayReady(opts = {}) {
   const timeoutMs = opts.timeoutMs ?? 20_000;
+  const child = opts.child ?? null;
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
+    // R8: if our gateway process already exited, a response on the port would come from some
+    // other process (e.g. an old gateway still draining) — not a successful start.
+    if (child && (child.exitCode !== null || child.signalCode !== null)) return false;
     try {
       // Try the default Control UI base path, then fall back to root.
       const paths = ["/healthz", "/openclaw", "/"];
@@ -309,23 +349,33 @@ async function startGateway() {
     OPENCLAW_GATEWAY_TOKEN,
   ];
 
-  gatewayProc = childProcess.spawn(OPENCLAW_NODE, clawArgs(args), {
+  const child = childProcess.spawn(OPENCLAW_NODE, clawArgs(args), {
     stdio: "inherit",
     env: childEnv(),
   });
+  gatewayProc = child;
+  untrackedLogged = false;
+  peers.beat(true);
 
-  gatewayProc.on("error", (err) => {
+  // R8: handlers only clear the reference for their own process. An old gateway that exits
+  // late must not wipe the reference to the new one (that made the wrapper start extra
+  // gateways which exited 78 while the real one kept running untracked).
+  child.on("error", (err) => {
     const msg = `[gateway] spawn error: ${String(err)}`;
     console.error(msg);
     lastGatewayError = msg;
-    gatewayProc = null;
+    if (gatewayProc === child) gatewayProc = null;
+    peers.beat(Boolean(gatewayProc));
   });
 
-  gatewayProc.on("exit", (code, signal) => {
-    const msg = `[gateway] exited code=${code} signal=${signal}`;
-    console.error(msg);
-    lastGatewayExit = { code, signal, at: new Date().toISOString() };
-    gatewayProc = null;
+  child.on("exit", (code, signal) => {
+    // Exit 78: another healthy OpenClaw gateway already owns this state directory (OpenClaw's
+    // supervisor contract) — not a crash.
+    const note = code === 78 ? " (another gateway already owns the state — not a crash)" : "";
+    console.error(`[gateway] exited code=${code} signal=${signal} pid=${child.pid}${note}`);
+    lastGatewayExit = { code, signal, pid: child.pid, at: new Date().toISOString() };
+    if (gatewayProc === child) gatewayProc = null;
+    peers.beat(Boolean(gatewayProc));
   });
 }
 
@@ -344,27 +394,57 @@ async function runDoctorBestEffort() {
   }
 }
 
-async function ensureGatewayRunning() {
+// R8: `attempts` > 1 retries a start that fails quickly (e.g. the previous owner's lock is
+// still being released); a copy on standby never starts a gateway.
+async function ensureGatewayRunning({ attempts = 1, retryDelayMs = 10_000 } = {}) {
   if (!isConfigured()) return { ok: false, reason: "not configured" };
   const latch = safety.latchInfo();
   if (latch) throw new Error(`stopped-by-owner (${latch.reason}); start it from /setup when ready`);
   if (gatewayProc) return { ok: true };
+  if (restoreInProgress) throw new Error("restore in progress; the gateway starts when it is done");
+  const sb = peers.status(false);
+  if (sb.standby) throw new Error(`standby: ${sb.reason}`);
   if (!gatewayStarting) {
     gatewayStarting = (async () => {
-      try {
-        lastGatewayError = null;
-        await startGateway();
-        const ready = await waitForGatewayReady({ timeoutMs: 20_000 });
-        if (!ready) {
-          throw new Error("Gateway did not become ready in time");
+      let lastErr = null;
+      for (let i = 1; i <= Math.max(1, attempts); i++) {
+        try {
+          lastGatewayError = null;
+          // Re-checked before every attempt: the owner may have stopped Jarvis, a restore may have
+          // begun, or another copy may have taken over while we were retrying.
+          if (safety.isLatched()) throw new Error("stopped-by-owner");
+          if (restoreInProgress) throw new Error("restore in progress");
+          const sbNow = peers.status(Boolean(gatewayProc));
+          if (sbNow.standby) throw new Error(`standby: ${sbNow.reason}`);
+          await startGateway();
+          const child = gatewayProc;
+          const spawnedAt = Date.now();
+          let ready = await waitForGatewayReady({ timeoutMs: 30_000, child });
+          // A new gateway that finds another healthy gateway in control exits 78 within a few
+          // seconds, and meanwhile the port answers for the other one. Only call it ready once
+          // our process has stayed up for a few seconds.
+          if (ready) {
+            const settle = GATEWAY_SETTLE_MS - (Date.now() - spawnedAt);
+            if (settle > 0) await sleep(settle);
+            ready = gatewayProc === child && child.exitCode === null && child.signalCode === null;
+          }
+          if (ready) return;
+          lastErr = new Error(child && child.exitCode === null && child.signalCode === null
+            ? "Gateway did not become ready in time"
+            : `Gateway exited during startup (${lastGatewayExit?.code != null ? `code ${lastGatewayExit.code}` : `signal ${lastGatewayExit?.signal ?? "?"}`})`);
+        } catch (err) {
+          lastErr = err;
+          if (/stopped-by-owner|standby:|restore in progress/.test(String(err))) break;
         }
-      } catch (err) {
-        const msg = `[gateway] start failure: ${String(err)}`;
-        lastGatewayError = msg;
-        // Collect extra diagnostics to help users file issues.
-        await runDoctorBestEffort();
-        throw err;
+        if (i < attempts) {
+          console.warn(`[gateway] start attempt ${i}/${attempts} failed: ${String(lastErr)}; retrying in ${Math.round(retryDelayMs / 1000)}s`);
+          await sleep(retryDelayMs);
+        }
       }
+      lastGatewayError = `[gateway] start failure: ${String(lastErr)}`;
+      // Collect extra diagnostics to help users file issues.
+      await runDoctorBestEffort();
+      throw lastErr ?? new Error("Gateway did not start");
     })().finally(() => {
       gatewayStarting = null;
     });
@@ -373,18 +453,17 @@ async function ensureGatewayRunning() {
   return { ok: true };
 }
 
-async function restartGateway() {
-  if (gatewayProc) {
-    try {
-      gatewayProc.kill("SIGTERM");
-    } catch {
-      // ignore
-    }
-    // Give it a moment to exit and release the port.
-    await sleep(750);
-    gatewayProc = null;
+// R8: a restart waits until the old gateway is really gone (hard stop after 15 s) before starting
+// the new one. Before, the old gateway kept draining for ~5 minutes while holding its lock, each
+// new gateway exited 78, and the watchdog counted those as crashes (the 26 Sep false alerts).
+async function restartGateway({ attempts = 6 } = {}) {
+  gatewayLifecycleBusy = true;
+  try {
+    await stopGatewayProc({ hardAfterMs: 15_000 });
+    return await ensureGatewayRunning({ attempts, retryDelayMs: 10_000 });
+  } finally {
+    gatewayLifecycleBusy = false;
   }
-  return ensureGatewayRunning();
 }
 
 function launchJarvisAgentSmokeV1() {
@@ -1352,6 +1431,8 @@ const ALLOWED_CONSOLE_COMMANDS = new Set([
   "fuse.test",
   "gateway.crash-test",
   "watchdog.status",
+  "watchdog.reset",
+  "wrapper.info",
   "alert.test",
   "openclaw.gateway.call",
   "test.turn",
@@ -1403,12 +1484,15 @@ app.post("/setup/api/console/run", requireSetupAuth, async (req, res) => {
     if (cmd === "gateway.stop") {
       // B5: a deliberate stop latches — watchdog, UI visits and container restarts will not revive it.
       safety.setLatch(arg === "commissioning-test" ? "commissioning-test" : "owner-console", "setup");
-      await stopGatewayProc({ hardAfterMs: 10_000 });
+      gatewayLifecycleBusy = true;
+      try { await stopGatewayProc({ hardAfterMs: 10_000 }); } finally { gatewayLifecycleBusy = false; }
       return res.json({ ok: true, output: "Gateway stopped and latched (stays stopped until gateway.start).\n" });
     }
     if (cmd === "gateway.start") {
       safety.clearLatch("setup");
-      const r = await ensureGatewayRunning();
+      gatewayLifecycleBusy = true;
+      let r;
+      try { r = await ensureGatewayRunning({ attempts: 3, retryDelayMs: 10_000 }); } finally { gatewayLifecycleBusy = false; }
       return res.json({ ok: Boolean(r.ok), output: r.ok ? "Latch cleared. Gateway started.\n" : `Gateway not started: ${r.reason}\n` });
     }
     if (cmd === "latch.status") {
@@ -1429,10 +1513,37 @@ app.post("/setup/api/console/run", requireSetupAuth, async (req, res) => {
     }
     if (cmd === "gateway.crash-test") {
       // B2 proof: kill the gateway WITHOUT latching; the watchdog must bring it back within ~2 min.
+      // R8: a test restart is silent (no owner alert) and does not use the real restart budget.
       if (!gatewayProc) return res.json({ ok: false, output: "gateway not running\n" });
-      watchdogTestNote = "restart test by Claude — no action needed";
+      watchdogTest = true;
       try { gatewayProc.kill("SIGKILL"); } catch {}
-      return res.json({ ok: true, output: "Gateway killed (SIGKILL, no latch). The watchdog should restart it within about 2 minutes.\n" });
+      return res.json({ ok: true, output: "Gateway killed (SIGKILL, no latch). The watchdog should restart it within about 2 minutes (test: no alert).\n" });
+    }
+    if (cmd === "watchdog.reset") {
+      // Clears restart-budget entries (e.g. restarts caused by a known bug, or by tests).
+      const before = safety.restartBudget();
+      safety.resetRestarts();
+      return res.json({ ok: true, output: JSON.stringify({ cleared: before.recent.length, budget: safety.restartBudget() }) + "\n" });
+    }
+    if (cmd === "wrapper.info") {
+      const allGateways = findGatewayPids({ port: INTERNAL_GATEWAY_PORT });
+      return res.json({ ok: true, output: JSON.stringify({
+        pid: process.pid,
+        startedAt: new Date(WRAPPER_STARTED_AT).toISOString(),
+        uptimeSec: Math.round((Date.now() - WRAPPER_STARTED_AT) / 1000),
+        deploymentId: process.env.RAILWAY_DEPLOYMENT_ID || null,
+        gatewayPid: gatewayProc?.pid ?? null,
+        gatewayStarting: Boolean(gatewayStarting),
+        gatewayPidsFound: allGateways,
+        untrackedGatewayPids: strayGatewayPids(),
+        lastGatewayExit,
+        lastGatewayError,
+        bootStartPending,
+        latch: safety.latchInfo(),
+        budget: safety.restartBudget(),
+        peers: peers.info(),
+        recentAlerts: safety.recentAlerts(8),
+      }, null, 2) + "\n" });
     }
     if (cmd === "fuse.check") {
       const f = await safety.fuseTick({ stopGateway: () => stopGatewayProc({ hardAfterMs: 10_000 }) });
@@ -1756,14 +1867,14 @@ app.post("/setup/api/reset", requireSetupAuth, async (_req, res) => {
   // Keep credentials/sessions/workspace by default.
   try {
     // Stop gateway to avoid running gateway + onboard concurrently on small Railway instances.
+    // R8: wait until it is really gone (it otherwise drains for minutes).
     try {
-      if (gatewayProc) {
-        try { gatewayProc.kill("SIGTERM"); } catch {}
-        await sleep(750);
-        gatewayProc = null;
-      }
+      gatewayLifecycleBusy = true;
+      await stopGatewayProc({ hardAfterMs: 15_000 });
     } catch {
       // ignore
+    } finally {
+      gatewayLifecycleBusy = false;
     }
 
     const candidates = typeof resolveConfigCandidates === "function" ? resolveConfigCandidates() : [configPath()];
@@ -1960,39 +2071,44 @@ app.post("/setup/import", requireSetupAuth, async (req, res) => {
         .send("Import is only supported when OPENCLAW_STATE_DIR and OPENCLAW_WORKSPACE_DIR are under /data (Railway volume).\n");
     }
 
-    // Stop gateway before restore so we don't overwrite live files.
-    if (gatewayProc) {
-      try { gatewayProc.kill("SIGTERM"); } catch {}
-      await sleep(750);
-      gatewayProc = null;
-    }
-
     const buf = await readBodyBuffer(req, 250 * 1024 * 1024); // 250MB max
     if (!buf.length) return res.status(400).type("text/plain").send("Empty body\n");
 
-    // Extract into /data.
-    // We only allow safe relative paths, and we intentionally do NOT delete existing files.
-    // (Users can reset/redeploy or manually clean the volume if desired.)
-    const tmpPath = path.join(os.tmpdir(), `openclaw-import-${Date.now()}.tar.gz`);
-    fs.writeFileSync(tmpPath, buf);
+    // Stop gateway before restore so we don't overwrite live files. R8: wait until it is really
+    // gone (the old SIGTERM + 750 ms left it draining while files were overwritten), and keep the
+    // watchdog and the proxy from starting it again until the files are in place.
+    restoreInProgress = true;
+    gatewayLifecycleBusy = true;
+    try {
+      await stopGatewayProc({ hardAfterMs: 15_000 });
 
-    await tar.x({
-      file: tmpPath,
-      cwd: dataRoot,
-      gzip: true,
-      strict: true,
-      onwarn: () => {},
-      filter: (p, entry) => {
-        // Allow only safe relative paths. Restore archives do not need links;
-        // rejecting symlink/hardlink entries prevents link-based escape tricks.
-        if (!looksSafeTarPath(p)) return false;
-        const type = String(entry?.type || "");
-        if (type === "SymbolicLink" || type === "Link") return false;
-        return true;
-      },
-    });
+      // Extract into /data.
+      // We only allow safe relative paths, and we intentionally do NOT delete existing files.
+      // (Users can reset/redeploy or manually clean the volume if desired.)
+      const tmpPath = path.join(os.tmpdir(), `openclaw-import-${Date.now()}.tar.gz`);
+      fs.writeFileSync(tmpPath, buf);
 
-    try { fs.rmSync(tmpPath, { force: true }); } catch {}
+      await tar.x({
+        file: tmpPath,
+        cwd: dataRoot,
+        gzip: true,
+        strict: true,
+        onwarn: () => {},
+        filter: (p, entry) => {
+          // Allow only safe relative paths. Restore archives do not need links;
+          // rejecting symlink/hardlink entries prevents link-based escape tricks.
+          if (!looksSafeTarPath(p)) return false;
+          const type = String(entry?.type || "");
+          if (type === "SymbolicLink" || type === "Link") return false;
+          return true;
+        },
+      });
+
+      try { fs.rmSync(tmpPath, { force: true }); } catch {}
+    } finally {
+      restoreInProgress = false;
+      gatewayLifecycleBusy = false;
+    }
 
     // Restart gateway after restore.
     if (isConfigured()) {
@@ -2749,16 +2865,26 @@ function applyJarvisOperationalDefaults() {
 }
 
 // B2 gateway watchdog: restart a crashed or frozen gateway (max 3 per hour), then escalate.
+// R8: stays out of deliberate stops/restarts and boot starts, stands by while another copy of
+// the wrapper runs Jarvis, treats a running-but-untracked gateway as running, and only reports
+// "restarted" when the restart worked. A crash test restarts silently and uncounted.
 async function gatewayWatchdogTick() {
-  if (watchdogBusy || !isConfigured() || gatewayStarting) return;
+  const bootOwnsStart = bootStartPending && Date.now() - WRAPPER_STARTED_AT < 15 * 60 * 1000;
+  if (watchdogBusy || gatewayLifecycleBusy || restoreInProgress || bootOwnsStart || !isConfigured() || gatewayStarting) return;
   if (safety.isLatched()) { watchdogFailures = 0; return; }
+  if (isStandby()) { watchdogFailures = 0; return; }
   if (Date.now() - WRAPPER_STARTED_AT < 3 * 60 * 1000) return; // boot grace (boot retry timer owns this window)
   watchdogBusy = true;
   try {
     let reason = null;
-    if (!gatewayProc) {
+    const untracked = gatewayProc ? [] : strayGatewayPids();
+    if (!gatewayProc && untracked.length === 0) {
       reason = "had stopped unexpectedly";
     } else if (await gatewayResponds(8_000)) {
+      if (untracked.length && !untrackedLogged) {
+        untrackedLogged = true;
+        console.warn(`[watchdog-v1] gateway is running but untracked (pid ${untracked.join(", ")}); it keeps running, and stops still reach it`);
+      }
       watchdogFailures = 0;
       return;
     } else {
@@ -2767,25 +2893,44 @@ async function gatewayWatchdogTick() {
       if (watchdogFailures < 3) return;
       reason = "was frozen for about 3 minutes";
     }
-    const budget = safety.restartBudget();
-    if (budget.remaining <= 0) {
-      await safety.sendAlert("watchdog-escalation", `Jarvis ${reason} and has already been restarted 3 times in the last hour. Automatic restarts are paused — needs attention.`, { dedupeMs: 60 * 60 * 1000 });
+    const isTest = watchdogTest;
+    watchdogTest = false;
+    if (!isTest) {
+      const budget = safety.restartBudget();
+      if (budget.remaining <= 0) {
+        await safety.sendAlert("watchdog-escalation", `Jarvis ${reason} and has already been restarted 3 times in the last hour. Automatic restarts are paused — needs attention.`, { dedupeMs: 60 * 60 * 1000 });
+        return;
+      }
+    }
+    const n = isTest ? 0 : safety.recordRestart();
+    console.warn(`[watchdog-v1] gateway ${reason} — restarting${isTest ? " (test)" : ` (${n}/3 this hour)`}`);
+    let restarted = false;
+    gatewayLifecycleBusy = true;
+    try {
+      await stopGatewayProc({ hardAfterMs: 10_000 });
+      await ensureGatewayRunning({ attempts: 3, retryDelayMs: 10_000 });
+      restarted = true;
+    } catch (err) {
+      console.warn(`[watchdog-v1] restart failed: ${String(err)}`);
+    } finally {
+      gatewayLifecycleBusy = false;
+    }
+    watchdogFailures = 0;
+    if (isTest) {
+      console.log(`[watchdog-v1] test restart ${restarted ? "OK" : "FAILED"} (no owner alert for tests)`);
       return;
     }
-    const n = safety.recordRestart();
-    console.warn(`[watchdog-v1] gateway ${reason} — restarting (${n}/3 this hour)`);
-    await stopGatewayProc({ hardAfterMs: 10_000 });
-    try { await ensureGatewayRunning(); } catch (err) { console.warn(`[watchdog-v1] restart failed: ${String(err)}`); }
-    watchdogFailures = 0;
-    const note = watchdogTestNote ? ` (${watchdogTestNote})` : "";
-    watchdogTestNote = null;
-    await safety.sendAlert("watchdog-restart", `Jarvis ${reason} and was restarted automatically (${n}/3 this hour)${note}.`, note ? { force: true } : {});
+    if (restarted) {
+      await safety.sendAlert("watchdog-restart", `Jarvis ${reason} and was restarted automatically (${n}/3 this hour).`);
+    }
   } finally {
     watchdogBusy = false;
   }
 }
 
 const server = app.listen(PORT, "0.0.0.0", async () => {
+  // R8: the boot start owns bringing Jarvis up (the watchdog stays out until it is done).
+  if (isConfigured() && !safety.isLatched()) bootStartPending = true;
   console.log(`[wrapper] listening on :${PORT}`);
   console.log(`[wrapper] state dir: ${STATE_DIR}`);
   console.log(`[wrapper] workspace dir: ${WORKSPACE_DIR}`);
@@ -2863,17 +3008,28 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
     console.warn(`[wrapper-watchdog-v1] failed to start: ${String(err)}`);
   }
 
+  // R8: heartbeat for other copies of this wrapper on the same volume (every 15 s).
+  peers.beat(Boolean(gatewayProc));
+  setInterval(() => { peers.beat(Boolean(gatewayProc)); }, 15_000).unref?.();
+
   // B2 gateway watchdog (every 60 s) and B3 money fuse (every 5 min; first check after 1 min).
+  // R8: a copy on standby (another copy runs Jarvis) does no fuse or meter work and sends nothing.
   setInterval(() => { void gatewayWatchdogTick(); }, 60_000).unref?.();
-  const fuseRun = () => safety.fuseTick({ stopGateway: () => stopGatewayProc({ hardAfterMs: 10_000 }) });
+  const fuseRun = () => (isStandby() ? null : safety.fuseTick({
+    stopGateway: async () => {
+      gatewayLifecycleBusy = true;
+      try { await stopGatewayProc({ hardAfterMs: 10_000 }); } finally { gatewayLifecycleBusy = false; }
+    },
+  }));
   setTimeout(() => { void fuseRun(); }, 60_000).unref?.();
   setInterval(() => { void fuseRun(); }, 5 * 60_000).unref?.();
 
   // C3/C4/G2 meter: container sample every 5 min, meter-latest.md hourly, daily report 07:00
   // Qatar (WhatsApp, Telegram fallback), weekly $/task report Sundays 07:05. First tick after 4 min.
+  const meterRun = () => { if (!isStandby()) void meter.tick(); };
   setTimeout(() => {
-    void meter.tick();
-    setInterval(() => { void meter.tick(); }, 60_000).unref?.();
+    meterRun();
+    setInterval(meterRun, 60_000).unref?.();
   }, 4 * 60_000).unref?.();
 
   // B5: a latched (deliberate) stop survives container restarts and redeploys.
@@ -2889,38 +3045,57 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
   // work even if nobody visits the web UI.
   if (isConfigured() && !bootLatch) {
     console.log("[wrapper] config detected; starting gateway...");
-    try {
-      await ensureGatewayRunning();
-      console.log("[wrapper] gateway ready");
-      await runJarvisMainSessionRecoveryV1();
-      void reconcileSeatSessionPinsV1().catch((err) => console.warn(`[seat-pins-v3] failed: ${String(err)}`));
-      launchOpenRouterKeyAuditV1();
-      launchJarvisSecurityAuditV1();
-      launchJarvisAgentSmokeV1();
-      launchJarvisAdviserMemoryCommissioningV1();
-    } catch (err) {
-      console.error(`[wrapper] gateway failed to start at boot: ${String(err)}`);
-      // Railway can briefly overlap old/new containers on the same persistent volume.
-      // OpenClaw's gateway-owner lease may therefore outlive the old container for a few
-      // minutes. Retry automatically so Jarvis recovers without a manual restart.
-      const gatewayRetryTimer = setInterval(async () => {
-        try {
-          console.log("[wrapper] retrying gateway startup...");
-          await ensureGatewayRunning();
-          console.log("[wrapper] gateway ready after retry");
-          clearInterval(gatewayRetryTimer);
-          void reconcileSeatSessionPinsV1().catch((err) => console.warn(`[seat-pins-v3] failed: ${String(err)}`));
-          launchJarvisSecurityAuditV1();
-          launchJarvisAgentSmokeV1();
-          launchJarvisAdviserMemoryCommissioningV1();
-        } catch (retryErr) {
-          console.warn(`[wrapper] gateway retry not ready yet: ${String(retryErr)}`);
-        }
-      }, 45_000);
-      gatewayRetryTimer.unref?.();
-    }
+    void startGatewayAtBoot();
+  } else {
+    bootStartPending = false;
   }
 });
+
+// Boot start. Railway can briefly overlap old/new containers on the same persistent volume, and a
+// failed release can leave its container running for minutes. R8: while another copy runs Jarvis
+// this copy waits (standby) instead of starting a second gateway; then it starts with retries
+// (OpenClaw's lock can outlive the old container briefly). The watchdog stays out until this is
+// done; if Jarvis is still not up after 10 minutes the owner gets one alert.
+async function startGatewayAtBoot() {
+  bootStartPending = true;
+  const bootAt = Date.now();
+  let alerted = false;
+  let waitingLogged = false;
+  try {
+    for (;;) {
+      if (safety.isLatched()) { console.log("[wrapper] boot start skipped: stopped by owner"); return; }
+      if (gatewayProc) break;
+      const sb = peers.status(false);
+      if (sb.standby) {
+        if (!waitingLogged) { waitingLogged = true; console.log(`[wrapper] waiting to start Jarvis: ${sb.reason}`); }
+        await sleep(10_000);
+        continue;
+      }
+      try {
+        await ensureGatewayRunning({ attempts: 3, retryDelayMs: 10_000 });
+        break;
+      } catch (err) {
+        console.warn(`[wrapper] gateway not started yet: ${String(err)}`);
+        if (!alerted && Date.now() - bootAt > 10 * 60 * 1000) {
+          alerted = true;
+          await safety.sendAlert("boot-start-failed", "Salem AI restarted, but Jarvis has not come back after 10 minutes. It keeps retrying — needs attention if this persists.", { dedupeMs: 6 * 60 * 60 * 1000 });
+        }
+        await sleep(30_000);
+      }
+    }
+    console.log("[wrapper] gateway ready");
+    await runJarvisMainSessionRecoveryV1();
+    void reconcileSeatSessionPinsV1().catch((err) => console.warn(`[seat-pins-v3] failed: ${String(err)}`));
+    launchOpenRouterKeyAuditV1();
+    launchJarvisSecurityAuditV1();
+    launchJarvisAgentSmokeV1();
+    launchJarvisAdviserMemoryCommissioningV1();
+  } catch (err) {
+    console.error(`[wrapper] boot start error: ${String(err)}`);
+  } finally {
+    bootStartPending = false;
+  }
+}
 
 server.on("upgrade", async (req, socket, head) => {
   // Note: browsers cannot attach arbitrary HTTP headers (including Authorization: Basic)
@@ -2948,24 +3123,13 @@ async function shutdownGracefully(signal) {
   shutdownStarted = true;
   console.log(`[wrapper] received ${signal}; shutting down gateway cleanly...`);
 
-  const child = gatewayProc;
-  if (child) {
-    await new Promise((resolve) => {
-      let settled = false;
-      const finish = () => {
-        if (settled) return;
-        settled = true;
-        resolve();
-      };
-      child.once("exit", finish);
-      try {
-        child.kill("SIGTERM");
-      } catch {
-        finish();
-      }
-      setTimeout(finish, 8_000).unref?.();
-    });
-  }
+  // R8: tell other copies we are leaving (a new container can start Jarvis at once), and make
+  // sure our gateway is really gone (hard stop after 6 s) so its lock is released promptly.
+  peers.markStopping();
+  gatewayLifecycleBusy = true;
+  try {
+    await stopGatewayProc({ hardAfterMs: 6_000 });
+  } catch {}
 
   await new Promise((resolve) => {
     try {

@@ -43,6 +43,9 @@ export function createSafety({ stateDir, configPath, log = console, fetchImpl = 
   const spendPath = path.join(stateDir, "jarvis-spend-history.json");
   const watchdogPath = path.join(stateDir, "jarvis-watchdog.json");
   const fuseResetPath = path.join(stateDir, "jarvis-fuse-reset.json");
+  // R8: alert de-duplication is kept on the volume, so two overlapping copies of the wrapper
+  // (deploy overlap, leftover failed release) do not send the owner the same alert twice.
+  const alertLastPath = path.join(stateDir, "jarvis-alert-last.json");
   const lastSent = new Map();
   const fuse = {
     lastCheck: null, spend60: null, usageTotal: null, usageDaily: null, usageWeekly: null,
@@ -87,9 +90,11 @@ export function createSafety({ stateDir, configPath, log = console, fetchImpl = 
 
   async function sendAlert(kind, text, { force = false, dedupeMs = 30 * 60 * 1000 } = {}) {
     const now = Date.now();
-    const prev = lastSent.get(kind) || 0;
+    const shared = readJson(alertLastPath, {});
+    const prev = Math.max(lastSent.get(kind) || 0, Number(shared?.[kind]) || 0);
     if (!force && now - prev < dedupeMs) return { ok: true, deduped: true };
     lastSent.set(kind, now);
+    writeJson(alertLastPath, { ...(shared && typeof shared === "object" ? shared : {}), [kind]: now });
     const { token, chatId } = alertTarget();
     const record = { at: new Date(now).toISOString(), kind, text: String(text).slice(0, 500) };
     let ok = false;
@@ -249,6 +254,16 @@ export function createSafety({ stateDir, configPath, log = console, fetchImpl = 
     writeJson(watchdogPath, { restarts: recent });
     return recent.length;
   }
+  function resetRestarts() {
+    writeJson(watchdogPath, { restarts: [] });
+  }
+  // Last alerts sent to the owner (for checks after tests): time, kind, delivered, text.
+  function recentAlerts(n = 8) {
+    try {
+      const lines = fs.readFileSync(alertLogPath, "utf8").trim().split("\n").slice(-n);
+      return lines.map((l) => { try { const r = JSON.parse(l); return { at: r.at, kind: r.kind, ok: r.ok, text: String(r.text || "").slice(0, 120) }; } catch { return null; } }).filter(Boolean);
+    } catch { return []; }
+  }
 
   return {
     latchInfo, isLatched, setLatch, clearLatch,
@@ -256,6 +271,6 @@ export function createSafety({ stateDir, configPath, log = console, fetchImpl = 
     fuseTick, fuseStatus: () => ({ ...fuse, thresholds: thresholds() }),
     spendSamples: () => readJson(spendPath, { samples: [] }).samples || [],
     openRouterRequest,
-    restartBudget, recordRestart,
+    restartBudget, recordRestart, resetRestarts, recentAlerts,
   };
 }
