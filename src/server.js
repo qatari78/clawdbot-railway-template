@@ -1684,6 +1684,146 @@ async function runC2OutputEnvelopeDiagnosticV1() {
   }
 }
 
+
+function c2UsageSnapshot(message) {
+  const usage = message?.usage && typeof message.usage === "object" ? message.usage : {};
+  const num = (value) => (typeof value === "number" && Number.isFinite(value) ? value : 0);
+  return {
+    model: typeof message?.model === "string" ? message.model : null,
+    provider: typeof message?.provider === "string" ? message.provider : null,
+    input: num(usage.input),
+    output: num(usage.output),
+    cacheRead: num(usage.cacheRead),
+    cacheWrite: num(usage.cacheWrite),
+    totalTokens: num(usage.totalTokens),
+    costTotal: num(usage?.cost?.total),
+  };
+}
+
+async function runC2CacheProofV1() {
+  const markerPath = path.join(STATE_DIR, "c2-cache-proof-v1.json");
+  if (fs.existsSync(markerPath)) {
+    console.log("[c2-cache-v1] skipped marker=present");
+    return;
+  }
+
+  const env = {
+    ...process.env,
+    OPENCLAW_STATE_DIR: STATE_DIR,
+    OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
+  };
+  const sessionKey = "agent:main:explicit:c2-cache-proof-v1";
+  const turns = [
+    { runId: "c2-cache-v1-turn-1", message: "Reply exactly C2-CACHE-ONE. Do not use tools." },
+    { runId: "c2-cache-v1-turn-2", message: "Reply exactly C2-CACHE-TWO. Do not use tools." },
+  ];
+  const results = [];
+
+  try {
+    for (const turn of turns) {
+      const send = await runCmd(
+        OPENCLAW_NODE,
+        clawArgs([
+          "gateway",
+          "call",
+          "chat.send",
+          "--params",
+          JSON.stringify({
+            sessionKey,
+            agentId: "main",
+            message: turn.message,
+            thinking: "off",
+            deliver: false,
+            suppressCommandInterpretation: true,
+            idempotencyKey: turn.runId,
+          }),
+          "--expect-final",
+          "--timeout",
+          "120000",
+          "--json",
+        ]),
+        { env, timeoutMs: 140_000 },
+      );
+      if (send.code !== 0) throw new Error("cache proof chat.send failed");
+
+      const history = await runCmd(
+        OPENCLAW_NODE,
+        clawArgs([
+          "gateway",
+          "call",
+          "chat.history",
+          "--params",
+          JSON.stringify({
+            sessionKey,
+            agentId: "main",
+            limit: 20,
+            maxChars: 131072,
+          }),
+          "--timeout",
+          "15000",
+          "--json",
+        ]),
+        { env, timeoutMs: 25_000 },
+      );
+      if (history.code !== 0) throw new Error("cache proof chat.history failed");
+
+      const payload = b8ParseJsonLoose(history.output);
+      const messages = Array.isArray(payload?.messages) ? payload.messages : [];
+      const assistant = messages
+        .slice()
+        .reverse()
+        .find((message) => {
+          if (!message || message.role !== "assistant") return false;
+          const meta = message.__openclaw && typeof message.__openclaw === "object"
+            ? message.__openclaw
+            : {};
+          return message.idempotencyKey === turn.runId || meta.idempotencyKey === turn.runId;
+        }) ?? messages.slice().reverse().find((message) => message?.role === "assistant");
+
+      if (!assistant) throw new Error("cache proof assistant message missing");
+      results.push({
+        runId: turn.runId,
+        ...c2UsageSnapshot(assistant),
+      });
+    }
+
+    const result = {
+      version: 1,
+      generatedAt: new Date().toISOString(),
+      sessionKey,
+      deliveredExternally: false,
+      thinking: "off",
+      turns: results,
+      cacheTelemetryVisible: results.every((row) => Number.isFinite(row.cacheRead)),
+      secondTurnCacheHit: (results[1]?.cacheRead ?? 0) > 0,
+      pass:
+        results.length === 2 &&
+        results.every((row) => Number.isFinite(row.cacheRead)) &&
+        (results[1]?.cacheRead ?? 0) > 0,
+    };
+    console.log("[c2-cache-v1] " + JSON.stringify(result));
+    fs.writeFileSync(markerPath, JSON.stringify(result, null, 2) + "\n", {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+  } catch (err) {
+    const result = {
+      version: 1,
+      generatedAt: new Date().toISOString(),
+      sessionKey,
+      pass: false,
+      errorClass: err?.constructor?.name || "Error",
+      message: String(err?.message || err).slice(0, 300),
+      turns: results,
+    };
+    console.error("[c2-cache-v1] failed=" + JSON.stringify(result));
+    fs.writeFileSync(markerPath, JSON.stringify(result, null, 2) + "\n", {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+  }
+}
+
 async function runC1FreshFloorV1() {
   const sessionKey = "agent:main:main";
   const markerPath = path.join(STATE_DIR, "c1-fresh-floor-v1.json");
@@ -3656,6 +3796,7 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
       await runB8MemoryDiagnosticV1();
       await runB8MemoryDiagnosticV2();
       await runC2OutputEnvelopeDiagnosticV1();
+      await runC2CacheProofV1();
       launchOpenRouterKeyAuditV1();
       launchJarvisSecurityAuditV1();
       launchJarvisAgentSmokeV1();
@@ -3676,6 +3817,7 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
           await runB8MemoryDiagnosticV1();
       await runB8MemoryDiagnosticV2();
           await runC2OutputEnvelopeDiagnosticV1();
+          await runC2CacheProofV1();
           launchJarvisSecurityAuditV1();
           launchJarvisAgentSmokeV1();
           launchJarvisAdviserMemoryCommissioningV1();
