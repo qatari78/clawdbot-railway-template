@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   computeDay, openRouterSpend, renderDaily, scoutModels, isOwnerTaskSession, qatarDate,
-  qatarDayStartMs, addDays, percentile, renderWeekly,
+  qatarDayStartMs, addDays, percentile, renderWeekly, testMatcher,
 } from "../src/salem-meter.js";
 
 const Q = 15 * 60 * 1000;
@@ -128,4 +128,17 @@ test("scout finds price changes and new models; first run is a baseline", () => 
   assert.match(text, /Nothing is switched automatically/);
   assert.match(text, /grok-4\.7 \(earlier\): 4 × \$0\.50 = \$2\.00/);
   assert.match(text, /gpt-6-sol: 10 × \$0\.0030 = \$0\.03/);
+});
+
+test("deleted test sessions and commissioning days stay out of $/task", () => {
+  const row = (key, date = "2026-09-26", quarterIndex = 40, cost = 1) => ({ key, usage: { utcQuarterHourTokenUsage: [{ date, quarterIndex, totalCost: cost }], modelUsage: [{ model: "openai/gpt-6-sol", count: 1, totals: { totalCost: cost } }] } });
+  const m = testMatcher({ ids: ["aaaa-1111"], days: ["2026-09-26"] });
+  assert.equal(m("agent:main:explicit:claude-test-x", row("agent:main:explicit:claude-test-x")), true);
+  assert.equal(m("agent:main:aaaa-1111", row("agent:main:aaaa-1111", "2026-09-20")), true); // ledger id, any day
+  assert.equal(m("agent:main:bbbb-2222", row("agent:main:bbbb-2222")), true);                // commissioning day
+  assert.equal(m("agent:main:bbbb-2222", row("agent:main:bbbb-2222", "2026-09-28")), false); // ordinary day
+  assert.equal(m("agent:main:whatsapp:direct:+97400000000", row("agent:main:whatsapp:direct:+97400000000")), false);
+  assert.equal(m("agent:main:main", row("agent:main:main")), false);
+  const noLedger = testMatcher(null);
+  assert.equal(noLedger("agent:main:bbbb-2222", row("agent:main:bbbb-2222")), false);
 });

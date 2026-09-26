@@ -66,6 +66,25 @@ export function isTestSession(key) {
   return String(key || "").includes(":explicit:claude-test-");
 }
 
+// R11: a test session that has been deleted keeps its usage, but its row key loses the
+// "claude-test" name (it becomes agent:<id>:<sessionId>). The test ledger lists those session
+// ids (recorded by test.cleanup) and commissioning days, on which every session outside the
+// owner's own chats and Jarvis's main session was a test. Returns (key, row) => boolean.
+export function testMatcher(ledger) {
+  const ids = new Set((ledger?.ids ?? []).map(String));
+  const days = new Set((ledger?.days ?? []).map(String));
+  return (key, row) => {
+    const k = String(key || "");
+    if (isTestSession(k)) return true;
+    if (ids.size && ids.has(k.split(":").pop())) return true;
+    if (days.size && !isOwnerTaskSession(k) && k !== "agent:main:main") {
+      const buckets = row?.usage?.utcQuarterHourTokenUsage ?? [];
+      if (buckets.some((b) => days.has(qatarDate(bucketMs(b))))) return true;
+    }
+    return false;
+  };
+}
+
 export function roomOf(agentId) {
   const id = String(agentId || "");
   if (id === "main") return "Jarvis";
@@ -89,8 +108,8 @@ const bucketMs = (b) => Date.parse(`${b.date}T00:00:00Z`) + Number(b.quarterInde
 
 // Build one day's meter from a `sessions.usage` result for that day.
 // `windowStart`/`windowEnd` bound the day in epoch ms (Qatar calendar day).
-export function computeDay(result, { windowStart, windowEnd, includeTests = false } = {}) {
-  const rows = (result?.sessions ?? []).filter((r) => includeTests || !isTestSession(r.key));
+export function computeDay(result, { windowStart, windowEnd, includeTests = false, isTest = (key) => isTestSession(key) } = {}) {
+  const rows = (result?.sessions ?? []).filter((r) => includeTests || !isTest(r.key, r));
   const inWindow = (ms) => ms >= windowStart && ms < windowEnd;
 
   const taskBuckets = new Map(); // bucketMs -> owner messages
@@ -106,7 +125,7 @@ export function computeDay(result, { windowStart, windowEnd, includeTests = fals
   for (const r of result?.sessions ?? []) {
     const u = r.usage;
     if (!u) continue;
-    if (!includeTests && isTestSession(r.key)) {
+    if (!includeTests && isTest(r.key, r)) {
       for (const b of u.utcQuarterHourTokenUsage ?? []) if (inWindow(bucketMs(b))) testCost += Number(b.totalCost) || 0;
       continue;
     }
@@ -393,10 +412,13 @@ export function createMeter({ stateDir, workspaceDir, dataDir = "/data", gateway
     return last;
   }
 
+  const testLedgerPath = path.join(stateDir, "meter-test-sessions.json");
+  const readTestLedger = () => { try { return JSON.parse(fs.readFileSync(testLedgerPath, "utf8")); } catch { return { ids: [], days: [] }; } };
+
   async function day(dateStr) {
     const windowStart = qatarDayStartMs(dateStr);
     const res = await usageFor(dateStr, dateStr);
-    const d = computeDay(res, { windowStart, windowEnd: windowStart + DAY });
+    const d = computeDay(res, { windowStart, windowEnd: windowStart + DAY, isTest: testMatcher(readTestLedger()) });
     d.cacheStatus = res?.cacheStatus?.status ?? null;
     return d;
   }
@@ -456,7 +478,7 @@ export function createMeter({ stateDir, workspaceDir, dataDir = "/data", gateway
     const startDate = addDays(endDate, -6);
     const res = await usageFor(startDate, endDate);
     const windowStart = qatarDayStartMs(startDate);
-    const week = computeDay(res, { windowStart, windowEnd: qatarDayStartMs(endDate) + DAY });
+    const week = computeDay(res, { windowStart, windowEnd: qatarDayStartMs(endDate) + DAY, isTest: testMatcher(readTestLedger()) });
     const lu = lineup() || {};
     const seats = [
       ...(lu.jarvis ? [lu.jarvis] : []),

@@ -1457,6 +1457,7 @@ const ALLOWED_CONSOLE_COMMANDS = new Set([
   "wrapper.info",
   "cache.trace",
   "cache.probe",
+  "meter.testday",
   "alert.test",
   "openclaw.gateway.call",
   "test.turn",
@@ -1783,18 +1784,44 @@ app.post("/setup/api/console/run", requireSetupAuth, async (req, res) => {
       // enter memory search. Their cost stays recorded in the worklog.
       const removed = [];
       const failed = [];
+      const testSessionIds = new Set(); // R11: kept so the meter still counts their usage as tests
       for (const agentId of ["main", "forum-01", "forum-02", "forum-03", "counsel-01", "counsel-02", "counsel-03", "research-01", "research-02"]) {
         let data = null;
         try { data = await gatewayCallJson("sessions.list", { agentId, limit: 500 }, 60_000); } catch { continue; }
         const keys = new Set();
-        const walk = (o, d = 0) => { if (!o || typeof o !== "object" || d > 6) return; if (typeof o.key === "string" && o.key.includes(":explicit:claude-test-")) keys.add(o.key); for (const v of Object.values(o)) walk(v, d + 1); };
+        const walk = (o, d = 0) => {
+          if (!o || typeof o !== "object" || d > 6) return;
+          if (typeof o.key === "string" && o.key.includes(":explicit:claude-test-")) {
+            keys.add(o.key);
+            if (typeof o.sessionId === "string" && o.sessionId) testSessionIds.add(o.sessionId);
+          }
+          for (const v of Object.values(o)) walk(v, d + 1);
+        };
         walk(data);
         for (const key of keys) {
           try { await gatewayCallJson("sessions.delete", { key, agentId, deleteTranscript: true }, 60_000); removed.push(key); }
           catch (err) { failed.push({ key, error: String(err).slice(0, 160) }); }
         }
       }
-      return res.json({ ok: failed.length === 0, output: JSON.stringify({ removed, failed }, null, 2) + "\n" });
+      if (testSessionIds.size) {
+        const ledgerPath = path.join(STATE_DIR, "meter-test-sessions.json");
+        let ledger = { ids: [], days: [] };
+        try { ledger = JSON.parse(fs.readFileSync(ledgerPath, "utf8")); } catch {}
+        ledger.ids = Array.from(new Set([...(ledger.ids || []), ...testSessionIds])).slice(-2000);
+        try { fs.writeFileSync(ledgerPath, JSON.stringify(ledger, null, 2) + "\n", { mode: 0o600 }); } catch {}
+      }
+      return res.json({ ok: failed.length === 0, output: JSON.stringify({ removed, failed, recordedTestSessionIds: testSessionIds.size }, null, 2) + "\n" });
+    }
+    if (cmd === "meter.testday") {
+      // R11: mark a commissioning day — sessions outside the owner's own chats count as tests.
+      const date = String(arg || "").trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.json({ ok: false, output: "usage: meter.testday YYYY-MM-DD\n" });
+      const ledgerPath = path.join(STATE_DIR, "meter-test-sessions.json");
+      let ledger = { ids: [], days: [] };
+      try { ledger = JSON.parse(fs.readFileSync(ledgerPath, "utf8")); } catch {}
+      ledger.days = Array.from(new Set([...(ledger.days || []), date])).sort();
+      fs.writeFileSync(ledgerPath, JSON.stringify(ledger, null, 2) + "\n", { mode: 0o600 });
+      return res.json({ ok: true, output: JSON.stringify({ days: ledger.days, ids: (ledger.ids || []).length }) + "\n" });
     }
     if (cmd === "seat.set") {
       // Operator path to set one seat's model (same config change as the owner's
