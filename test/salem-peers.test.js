@@ -49,16 +49,27 @@ test("two wrappers on one volume: deploy overlap and a leftover failed release",
   assert.equal(late.info().peers.length, 3);
 });
 
-test("gateway processes are found by their command line; other openclaw commands are not", () => {
+test("gateway processes are found as owners of the listening gateway port, not by command line", () => {
   const proc = fs.mkdtempSync(path.join(os.tmpdir(), "salem-proc-"));
-  const mk = (pid, args) => { fs.mkdirSync(path.join(proc, String(pid))); fs.writeFileSync(path.join(proc, String(pid), "cmdline"), args.join("\0") + "\0"); };
-  mk(101, ["node", "/openclaw/dist/entry.js", "gateway", "run", "--bind", "loopback", "--port", "18789", "--auth", "token", "--token", "x"]);
-  mk(102, ["node", "/openclaw/dist/entry.js", "gateway", "call", "health", "--json"]);
-  mk(103, ["node", "/openclaw/dist/entry.js", "gateway", "run", "--port", "19999"]);
-  mk(104, ["bash", "-c", "sleep 1"]);
+  fs.mkdirSync(path.join(proc, "net"));
+  // 127.0.0.1:18789 LISTEN (inode 5551); 127.0.0.1:18789 ESTABLISHED client (inode 5552); :8080 LISTEN (inode 5553)
+  fs.writeFileSync(path.join(proc, "net", "tcp"), [
+    "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode",
+    "   0: 0100007F:4965 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 5551 1 0000000000000000 100 0 0 10 0",
+    "   1: 0100007F:4965 0100007F:D2F0 01 00000000:00000000 00:00000000 00000000     0        0 5552 1 0000000000000000 20 4 30 10 -1",
+    "   2: 00000000:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 5553 1 0000000000000000 100 0 0 10 0",
+  ].join("\n") + "\n");
+  const mk = (pid, sockets) => {
+    fs.mkdirSync(path.join(proc, String(pid), "fd"), { recursive: true });
+    sockets.forEach((inode, i) => fs.symlinkSync(`socket:[${inode}]`, path.join(proc, String(pid), "fd", String(10 + i))));
+  };
+  mk(101, [5551]);        // the gateway (every OpenClaw process is titled "openclaw", so the port decides)
+  mk(102, [5552]);        // an "openclaw gateway call" client connected to it
+  mk(103, [5553]);        // the wrapper's own listener
   fs.mkdirSync(path.join(proc, "self"));
-  assert.deepEqual(findGatewayPids({ port: 18789, procDir: proc }).sort(), [101]);
+  assert.deepEqual(findGatewayPids({ port: 18789, procDir: proc }), [101]);
   assert.deepEqual(findGatewayPids({ port: 18789, procDir: proc, excludePids: [101] }), []);
+  assert.deepEqual(findGatewayPids({ port: 19999, procDir: proc }), []);
 });
 
 test("alert de-duplication is shared by copies of the wrapper on the same volume", async () => {
