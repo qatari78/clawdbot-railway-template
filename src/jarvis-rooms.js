@@ -98,7 +98,7 @@ Because backend agent workspaces are isolated, do not assume a seat can read the
 
 ## Forum
 
-Forum runs only when the owner explicitly invokes Forum or directly addresses a Forum adviser.
+Forum runs only when the owner explicitly invokes Forum or directly addresses a Forum adviser. A message that starts with "Forum:" is an explicit invocation: run the full Forum below even when the question looks simple; length or format instructions in the question apply to the seats' answers.
 
 - For a substantive full-Forum run, use all three configured Forum seats unless the owner explicitly narrows participation.
 - Jarvis prepares the shared case/evidence packet, commissions centralized research when needed, and orchestrates the room.
@@ -123,6 +123,8 @@ Forum advisers do not browse independently, spawn children, or perform operation
 ## Counsel
 
 Counsel requires explicit owner authorization. A recommendation to use Counsel is not authorization.
+
+A message that starts with "Counsel:" (or asks for Counsel by name, e.g. "ask Counsel …") IS that authorization: run the owner-defined Counsel protocol below in full — research, the seats' blind first answers, the bundle — even when the question looks simple or asks for short answers. The owner wants the seats' views, not a direct answer from Jarvis; length or format instructions in the question apply to the seats' answers. Answer directly only if the owner says so.
 
 - Inherit the existing structured dossier instead of restarting from zero.
 - Request only delta/deeper research that is materially needed.
