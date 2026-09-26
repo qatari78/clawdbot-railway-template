@@ -1796,10 +1796,10 @@ async function runC2CacheInspectV1() {
   }
 }
 
-async function runC2CacheProofV2() {
-  const markerPath = path.join(STATE_DIR, "c2-cache-proof-v2.json");
+async function runC2CacheProofV3() {
+  const markerPath = path.join(STATE_DIR, "c2-cache-proof-v3.json");
   if (fs.existsSync(markerPath)) {
-    console.log("[c2-cache-v2] skipped marker=present");
+    console.log("[c2-cache-v3] skipped marker=present");
     return;
   }
 
@@ -1808,110 +1808,124 @@ async function runC2CacheProofV2() {
     OPENCLAW_STATE_DIR: STATE_DIR,
     OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
   };
-  const sessionKey = "agent:main:explicit:c2-cache-proof-v2";
+  const sessionKey = "c2-cache-proof-v3";
+  const canonicalSessionKey = "agent:main:c2-cache-proof-v3";
   const turns = [
-    { runId: "c2-cache-v2-turn-1", message: "Reply exactly C2-CACHE-ONE. Do not use tools." },
-    { runId: "c2-cache-v2-turn-2", message: "Reply exactly C2-CACHE-TWO. Do not use tools." },
+    { runId: "c2-cache-v3-turn-1", message: "C2 prompt-cache proof turn one. Do not browse or use tools. Reply exactly: C2-CACHE-ONE" },
+    { runId: "c2-cache-v3-turn-2", message: "C2 prompt-cache proof turn two. Do not browse or use tools. Reply exactly: C2-CACHE-TWO" },
   ];
   const results = [];
+  const numOrNull = (value) =>
+    typeof value === "number" && Number.isFinite(value) ? value : null;
 
   try {
     for (const turn of turns) {
       const send = await runCmd(
         OPENCLAW_NODE,
         clawArgs([
-          "gateway",
-          "call",
-          "chat.send",
-          "--params",
-          JSON.stringify({
-            sessionKey,
-            agentId: "main",
-            message: turn.message,
-            thinking: "off",
-            deliver: false,
-            idempotencyKey: turn.runId,
-          }),
-          "--expect-final",
-          "--timeout",
-          "120000",
+          "agent",
+          "--agent",
+          "main",
+          "--session-key",
+          sessionKey,
+          "--message",
+          turn.message,
+          "--thinking",
+          "off",
           "--json",
         ]),
         { env, timeoutMs: 140_000 },
       );
-      if (send.code !== 0) throw new Error("cache proof chat.send failed");
+      if (send.code !== 0) throw new Error("cache proof openclaw agent failed");
 
-      const history = await runCmd(
-        OPENCLAW_NODE,
-        clawArgs([
-          "gateway",
-          "call",
-          "chat.history",
-          "--params",
-          JSON.stringify({
-            sessionKey,
-            agentId: "main",
-            limit: 20,
-            maxChars: 131072,
-          }),
-          "--timeout",
-          "15000",
-          "--json",
-        ]),
-        { env, timeoutMs: 25_000 },
-      );
-      if (history.code !== 0) throw new Error("cache proof chat.history failed");
+      const payload = b8ParseJsonLoose(send.output);
+      if (!payload || typeof payload !== "object") {
+        throw new Error("cache proof agent JSON missing");
+      }
+      const resultPayload =
+        payload.result && typeof payload.result === "object" ? payload.result : {};
+      const agentMeta =
+        (payload.meta?.agentMeta && typeof payload.meta.agentMeta === "object"
+          ? payload.meta.agentMeta
+          : null) ??
+        (resultPayload.meta?.agentMeta && typeof resultPayload.meta.agentMeta === "object"
+          ? resultPayload.meta.agentMeta
+          : null) ??
+        (payload.agentMeta && typeof payload.agentMeta === "object" ? payload.agentMeta : null) ??
+        {};
+      const usage =
+        (agentMeta.usage && typeof agentMeta.usage === "object" ? agentMeta.usage : null) ??
+        (payload.usage && typeof payload.usage === "object" ? payload.usage : null) ??
+        (resultPayload.usage && typeof resultPayload.usage === "object"
+          ? resultPayload.usage
+          : null) ??
+        {};
 
-      const payload = b8ParseJsonLoose(history.output);
-      const messages = Array.isArray(payload?.messages) ? payload.messages : [];
-      const assistant = messages
-        .slice()
-        .reverse()
-        .find((message) => {
-          if (!message || message.role !== "assistant") return false;
-          const meta = message.__openclaw && typeof message.__openclaw === "object"
-            ? message.__openclaw
-            : {};
-          return message.idempotencyKey === turn.runId || meta.idempotencyKey === turn.runId;
-        }) ?? messages.slice().reverse().find((message) => message?.role === "assistant");
-
-      if (!assistant) throw new Error("cache proof assistant message missing");
       results.push({
-        runId: turn.runId,
-        ...c2UsageSnapshot(assistant),
+        runId: payload.runId ?? resultPayload.runId ?? turn.runId,
+        sessionId:
+          agentMeta.sessionId ?? payload.sessionId ?? resultPayload.sessionId ?? null,
+        model: agentMeta.model ?? payload.model ?? resultPayload.model ?? null,
+        provider: agentMeta.provider ?? payload.provider ?? resultPayload.provider ?? null,
+        input: numOrNull(usage.input),
+        output: numOrNull(usage.output),
+        cacheRead: numOrNull(usage.cacheRead),
+        cacheWrite: numOrNull(usage.cacheWrite),
+        totalTokens: numOrNull(usage.total ?? usage.totalTokens),
+        costTotal: numOrNull(
+          agentMeta.costUsd ?? payload.costUsd ?? resultPayload.costUsd,
+        ),
+        assistantTurns: numOrNull(
+          agentMeta.assistantTurns ?? payload.assistantTurns ?? resultPayload.assistantTurns,
+        ),
       });
     }
 
+    const realProviderTurns =
+      results.length === 2 &&
+      results.every(
+        (row) =>
+          typeof row.provider === "string" &&
+          row.provider.length > 0 &&
+          row.provider !== "openclaw" &&
+          typeof row.model === "string" &&
+          row.model.length > 0 &&
+          row.model !== "gateway-injected",
+      );
+    const cacheTelemetryVisible =
+      results.length === 2 && results.every((row) => Number.isFinite(row.cacheRead));
+    const secondTurnCacheHit = (results[1]?.cacheRead ?? 0) > 0;
     const result = {
-      version: 2,
+      version: 3,
       generatedAt: new Date().toISOString(),
-      sessionKey,
+      sessionKey: canonicalSessionKey,
       deliveredExternally: false,
+      invocation: "openclaw-agent-gateway",
       thinking: "off",
       turns: results,
-      cacheTelemetryVisible: results.every((row) => Number.isFinite(row.cacheRead)),
-      secondTurnCacheHit: (results[1]?.cacheRead ?? 0) > 0,
-      pass:
-        results.length === 2 &&
-        results.every((row) => Number.isFinite(row.cacheRead)) &&
-        (results[1]?.cacheRead ?? 0) > 0,
+      realProviderTurns,
+      cacheTelemetryVisible,
+      secondTurnCacheHit,
+      pass: realProviderTurns && cacheTelemetryVisible && secondTurnCacheHit,
     };
-    console.log("[c2-cache-v2] " + JSON.stringify(result));
+    console.log("[c2-cache-v3] " + JSON.stringify(result));
     fs.writeFileSync(markerPath, JSON.stringify(result, null, 2) + "\n", {
       encoding: "utf8",
       mode: 0o600,
     });
   } catch (err) {
     const result = {
-      version: 2,
+      version: 3,
       generatedAt: new Date().toISOString(),
-      sessionKey,
+      sessionKey: canonicalSessionKey,
+      deliveredExternally: false,
+      invocation: "openclaw-agent-gateway",
       pass: false,
       errorClass: err?.constructor?.name || "Error",
       message: String(err?.message || err).slice(0, 300),
       turns: results,
     };
-    console.error("[c2-cache-v2] failed=" + JSON.stringify(result));
+    console.error("[c2-cache-v3] failed=" + JSON.stringify(result));
     fs.writeFileSync(markerPath, JSON.stringify(result, null, 2) + "\n", {
       encoding: "utf8",
       mode: 0o600,
@@ -3891,7 +3905,7 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
       await runB8MemoryDiagnosticV1();
       await runB8MemoryDiagnosticV2();
       await runC2OutputEnvelopeDiagnosticV1();
-      await runC2CacheProofV2();
+      await runC2CacheProofV3();
       await runC2CacheInspectV1();
       launchOpenRouterKeyAuditV1();
       launchJarvisSecurityAuditV1();
@@ -3913,7 +3927,7 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
           await runB8MemoryDiagnosticV1();
       await runB8MemoryDiagnosticV2();
           await runC2OutputEnvelopeDiagnosticV1();
-          await runC2CacheProofV2();
+          await runC2CacheProofV3();
           await runC2CacheInspectV1();
           launchJarvisSecurityAuditV1();
           launchJarvisAgentSmokeV1();
