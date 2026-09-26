@@ -51,6 +51,38 @@ export function findGatewayPids({ port, excludePids = [], procDir = "/proc" } = 
   return out;
 }
 
+// All descendants of rootPid (children, grandchildren, …) from /proc/<pid>/stat parent links.
+// Must be taken BEFORE the root is killed: orphans are re-parented to PID 1 and lose the link.
+export function descendantPids(rootPid, { procDir = "/proc" } = {}) {
+  const children = new Map();
+  let names = [];
+  try { names = fs.readdirSync(procDir); } catch { return []; }
+  for (const name of names) {
+    if (!/^\d+$/.test(name)) continue;
+    let stat = "";
+    try { stat = fs.readFileSync(path.join(procDir, name, "stat"), "utf8"); } catch { continue; }
+    // "pid (comm) state ppid …" — comm may contain spaces or parentheses; read after the last ")".
+    const rest = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+    const ppid = Number(rest[1]);
+    if (!Number.isFinite(ppid)) continue;
+    if (!children.has(ppid)) children.set(ppid, []);
+    children.get(ppid).push(Number(name));
+  }
+  const out = [];
+  const queue = [Number(rootPid)];
+  const seen = new Set(queue);
+  while (queue.length) {
+    const p = queue.shift();
+    for (const c of children.get(p) || []) {
+      if (seen.has(c)) continue;
+      seen.add(c);
+      out.push(c);
+      queue.push(c);
+    }
+  }
+  return out;
+}
+
 export function processAlive(pid) {
   try { process.kill(pid, 0); return true; } catch (err) { return err?.code === "EPERM"; }
 }

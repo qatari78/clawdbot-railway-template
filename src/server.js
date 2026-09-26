@@ -19,7 +19,7 @@ import { applyJarvisSeatConfigV1, modelRefOf } from "./jarvis-seat-config-v1.js"
 import { runJarvisResearchCommissioningV1 } from "./jarvis-research-commissioning.js";
 import { createSafety } from "./salem-safety.js";
 import { createPeers } from "./salem-peers.js";
-import { findGatewayPids, processAlive } from "./salem-procs.js";
+import { findGatewayPids, processAlive, descendantPids } from "./salem-procs.js";
 import { createMeter } from "./salem-meter.js";
 import { createOwnerApprovals, isLoopbackRequest } from "./salem-approvals.js";
 
@@ -254,19 +254,39 @@ async function stopGatewayProc({ hardAfterMs = 10_000 } = {}) {
   const child = gatewayProc;
   let stopped = false;
   if (child && child.exitCode === null && child.signalCode === null) {
+    // R9: note everything the gateway started (exec sessions, research runner, spawn broker)
+    // before stopping it; once the gateway is gone they are re-parented and would keep running
+    // (and spending) after a stop. Seen 26 Sep: the research runner outlived a stop.
+    let tree = descendantPids(child.pid);
     await new Promise((resolve) => {
       let settled = false;
       const finish = () => { if (!settled) { settled = true; resolve(); } };
       child.once("exit", finish);
       try { child.kill("SIGTERM"); } catch { finish(); }
-      setTimeout(() => { try { child.kill("SIGKILL"); } catch {} setTimeout(finish, 2_000); }, hardAfterMs).unref?.();
+      setTimeout(() => {
+        tree = Array.from(new Set([...tree, ...descendantPids(child.pid)]));
+        try { child.kill("SIGKILL"); } catch {}
+        setTimeout(finish, 2_000);
+      }, hardAfterMs).unref?.();
     });
     stopped = true;
+    await killPids(tree, { label: "left over from the gateway" });
   }
   if (gatewayProc === child) gatewayProc = null;
   if (await killStrayGateways({ hardAfterMs })) stopped = true;
   peers.beat(Boolean(gatewayProc));
   return stopped;
+}
+
+async function killPids(pids, { label = "", hardAfterMs = 3_000 } = {}) {
+  const alive = pids.filter((pid) => processAlive(pid));
+  if (!alive.length) return 0;
+  console.warn(`[gateway] stopping ${alive.length} process(es) ${label}: ${alive.join(", ")}`);
+  for (const pid of alive) { try { process.kill(pid, "SIGTERM"); } catch {} }
+  const deadline = Date.now() + hardAfterMs;
+  while (Date.now() < deadline && alive.some((pid) => processAlive(pid))) await sleep(200);
+  for (const pid of alive) { if (processAlive(pid)) { try { process.kill(pid, "SIGKILL"); } catch {} } }
+  return alive.length;
 }
 
 // Gateway processes in this container that the wrapper is not tracking.
@@ -277,6 +297,7 @@ function strayGatewayPids() {
 async function killStrayGateways({ hardAfterMs = 10_000 } = {}) {
   const pids = strayGatewayPids();
   if (!pids.length) return false;
+  const trees = pids.flatMap((pid) => descendantPids(pid));
   console.warn(`[gateway] stopping ${pids.length} untracked gateway process(es): ${pids.join(", ")}`);
   for (const pid of pids) { try { process.kill(pid, "SIGTERM"); } catch {} }
   const deadline = Date.now() + hardAfterMs;
@@ -284,6 +305,7 @@ async function killStrayGateways({ hardAfterMs = 10_000 } = {}) {
   for (const pid of pids) { if (processAlive(pid)) { try { process.kill(pid, "SIGKILL"); } catch {} } }
   const until = Date.now() + 3_000;
   while (Date.now() < until && pids.some((pid) => processAlive(pid))) await sleep(100);
+  await killPids(trees, { label: "left over from an untracked gateway" });
   return true;
 }
 
@@ -1433,6 +1455,7 @@ const ALLOWED_CONSOLE_COMMANDS = new Set([
   "watchdog.status",
   "watchdog.reset",
   "wrapper.info",
+  "cache.trace",
   "alert.test",
   "openclaw.gateway.call",
   "test.turn",
@@ -1524,6 +1547,63 @@ app.post("/setup/api/console/run", requireSetupAuth, async (req, res) => {
       const before = safety.restartBudget();
       safety.resetRestarts();
       return res.json({ ok: true, output: JSON.stringify({ cleared: before.recent.length, budget: safety.restartBudget() }) + "\n" });
+    }
+    if (cmd === "cache.trace") {
+      // R9 diagnostic: why Jarvis's conversation is re-written to the prompt cache on every call.
+      // on/off toggles OpenClaw's cache trace; report[:<session filter>] compares consecutive
+      // requests of a session and shows where they first differ; clear deletes the trace file.
+      const [action, filter = ""] = String(arg || "report").split(/:(.*)/s);
+      const tracePath = path.join(STATE_DIR, "logs", "cache-trace.jsonl");
+      if (action === "on" || action === "off") {
+        const r = await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "diagnostics.cacheTrace.enabled", action === "on" ? "true" : "false"]));
+        return res.json({ ok: r.code === 0, output: redactSecrets(String(r.output || "")).slice(0, 600) });
+      }
+      if (action === "clear") {
+        try { fs.rmSync(tracePath, { force: true }); } catch {}
+        return res.json({ ok: true, output: "cache trace file deleted\n" });
+      }
+      let text = "";
+      try {
+        const st = fs.statSync(tracePath);
+        const len = Math.min(st.size, 24 * 1024 * 1024);
+        const fd = fs.openSync(tracePath, "r");
+        const buf = Buffer.alloc(len);
+        fs.readSync(fd, buf, 0, len, st.size - len);
+        fs.closeSync(fd);
+        text = buf.toString("utf8");
+      } catch (err) {
+        return res.json({ ok: false, output: `no cache trace yet: ${String(err).slice(0, 160)}\n` });
+      }
+      const events = text.split("\n").map((l) => { try { return JSON.parse(l); } catch { return null; } })
+        .filter((e) => e && (!filter || String(e.sessionKey || "").includes(filter)));
+      const stages = {};
+      for (const e of events) stages[e.stage] = (stages[e.stage] || 0) + 1;
+      const textOf = (m) => (m == null ? "" : typeof m.content === "string" ? m.content : JSON.stringify(m.content ?? m));
+      const around = (t, at) => t.slice(Math.max(0, at - 80), at + 220);
+      const ctx = events.filter((e) => e.stage === "stream:context" && Array.isArray(e.messageFingerprints));
+      const pairs = [];
+      for (let i = 1; i < ctx.length; i++) {
+        const a = ctx[i - 1];
+        const b = ctx[i];
+        if (a.sessionKey !== b.sessionKey) continue;
+        const fa = a.messageFingerprints;
+        const fb = b.messageFingerprints;
+        let k = 0;
+        while (k < fa.length && k < fb.length && fa[k] === fb[k]) k++;
+        const pair = { seq: [a.seq, b.seq], run: [String(a.runId || "").slice(0, 8), String(b.runId || "").slice(0, 8)], messages: [fa.length, fb.length], sameSystem: a.systemDigest === b.systemDigest, firstDifferentMessage: k < fa.length ? k : null };
+        if (k < fa.length && Array.isArray(a.messages) && Array.isArray(b.messages)) {
+          const ta = textOf(a.messages[k]);
+          const tb = textOf(b.messages[k]);
+          let c = 0;
+          while (c < ta.length && c < tb.length && ta[c] === tb[c]) c++;
+          pair.role = [a.messages[k]?.role, b.messages[k]?.role];
+          pair.charOffset = c;
+          pair.before = around(ta, c);
+          pair.after = around(tb, c);
+        }
+        pairs.push(pair);
+      }
+      return res.json({ ok: true, output: JSON.stringify({ events: events.length, stages, pairs: pairs.slice(-12) }, null, 2) + "\n" });
     }
     if (cmd === "wrapper.info") {
       const allGateways = findGatewayPids({ port: INTERNAL_GATEWAY_PORT });
@@ -2442,7 +2522,15 @@ function applyJarvisOperationalDefaults() {
     // are intentionally omitted so OpenClaw's built-in detector defaults apply.
     cfg.tools.loopDetection.enabled = true;
     console.log("[loop-detection-v1] enabled=true retired-runtime-tuning=absent");
-    if (cfg.tools.codeMode === undefined) cfg.tools.codeMode = "auto";
+    // R9: Code Mode waits hold up to 60 s (default 10 s). Each wait that returns "still waiting"
+    // costs a full model call; while research or seats ran, Jarvis re-checked every ~10 s and
+    // each check re-sent its whole working context (26 Sep: ~$0.13 a check, ~150 checks).
+    // Activation is unchanged: "auto" globally, on for Jarvis, off for seats (set below).
+    {
+      const cm = cfg.tools.codeMode;
+      const enabled = cm === undefined ? "auto" : (typeof cm === "object" && cm !== null ? (cm.enabled ?? false) : cm);
+      cfg.tools.codeMode = { ...(typeof cm === "object" && cm !== null ? cm : {}), enabled, timeoutMs: 60_000 };
+    }
     // v2026.3.8 merges global tools.alsoAllow into every agent profile.
     // That turns the intentionally-empty "minimal" adviser profile into a
     // restrictive explicit allowlist and aborts adviser runs before inference.

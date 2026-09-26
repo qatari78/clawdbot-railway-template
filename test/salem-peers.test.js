@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { standbyDecision, createPeers } from "../src/salem-peers.js";
-import { findGatewayPids } from "../src/salem-procs.js";
+import { findGatewayPids, descendantPids } from "../src/salem-procs.js";
 import { createSafety } from "../src/salem-safety.js";
 
 const quiet = { log() {}, warn() {} };
@@ -88,4 +88,19 @@ test("alert de-duplication is shared by copies of the wrapper on the same volume
   assert.equal(b.restartBudget().remaining, 1);
   b.resetRestarts();
   assert.equal(a.restartBudget().remaining, 3);
+});
+
+test("a stop reaches everything the gateway started (process tree from /proc stat)", () => {
+  const proc = fs.mkdtempSync(path.join(os.tmpdir(), "salem-tree-"));
+  const mk = (pid, comm, ppid) => { fs.mkdirSync(path.join(proc, String(pid))); fs.writeFileSync(path.join(proc, String(pid), "stat"), `${pid} (${comm}) S ${ppid} ${pid} ${pid} 0 -1 4194560`); };
+  mk(1, "tini", 0);
+  mk(2, "node", 1);             // wrapper
+  mk(50, "openclaw", 2);        // gateway
+  mk(60, "spawn broker", 50);   // comm with a space
+  mk(70, "node (runner)", 60);  // research runner under the broker; comm with parentheses
+  mk(80, "sh", 70);
+  mk(90, "node", 2);            // wrapper's own CLI call — not the gateway's
+  assert.deepEqual(descendantPids(50, { procDir: proc }).sort((a, b) => a - b), [60, 70, 80]);
+  assert.deepEqual(descendantPids(2, { procDir: proc }).sort((a, b) => a - b), [50, 60, 70, 80, 90]);
+  assert.deepEqual(descendantPids(999, { procDir: proc }), []);
 });
