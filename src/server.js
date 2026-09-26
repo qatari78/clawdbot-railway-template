@@ -17,6 +17,7 @@ import { runOpenRouterKeyAuditV1 } from "./openrouter-key-audit.js";
 import { applyJarvisResearchSystemV1 } from "./jarvis-research-system-v1.js";
 import { applyJarvisSeatConfigV1 } from "./jarvis-seat-config-v1.js";
 import { runJarvisResearchCommissioningV1 } from "./jarvis-research-commissioning.js";
+import { createSafety } from "./salem-safety.js";
 
 // Migrate deprecated CLAWDBOT_* env vars → OPENCLAW_* so existing Railway deployments
 // keep working. Users should update their Railway Variables to use the new names.
@@ -157,6 +158,37 @@ let lastGatewayExit = null;
 let lastDoctorOutput = null;
 let lastDoctorAt = null;
 
+// Salem AI safety net (Claude, 2026-09-26): stop latch, owner alerts, money fuse, watchdog budget.
+const safety = createSafety({ stateDir: STATE_DIR, configPath: configPath(), log: console });
+const WRAPPER_STARTED_AT = Date.now();
+let watchdogFailures = 0;
+let watchdogBusy = false;
+
+// Hard stop: SIGTERM, then SIGKILL if the gateway is still draining after hardAfterMs.
+async function stopGatewayProc({ hardAfterMs = 10_000 } = {}) {
+  const child = gatewayProc;
+  if (!child) return false;
+  await new Promise((resolve) => {
+    let settled = false;
+    const finish = () => { if (!settled) { settled = true; resolve(); } };
+    child.once("exit", finish);
+    try { child.kill("SIGTERM"); } catch { finish(); }
+    setTimeout(() => { try { child.kill("SIGKILL"); } catch {} setTimeout(finish, 1_000); }, hardAfterMs).unref?.();
+  });
+  if (gatewayProc === child) gatewayProc = null;
+  return true;
+}
+
+// Responsiveness check: the gateway must answer an HTTP request, not merely accept a TCP connect.
+async function gatewayResponds(timeoutMs = 8_000) {
+  try {
+    const res = await fetch(`${GATEWAY_TARGET}/healthz`, { signal: AbortSignal.timeout(timeoutMs) });
+    return Boolean(res);
+  } catch {
+    return false;
+  }
+}
+
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -246,6 +278,8 @@ async function runDoctorBestEffort() {
 
 async function ensureGatewayRunning() {
   if (!isConfigured()) return { ok: false, reason: "not configured" };
+  const latch = safety.latchInfo();
+  if (latch) throw new Error(`stopped-by-owner (${latch.reason}); start it from /setup when ready`);
   if (gatewayProc) return { ok: true };
   if (!gatewayStarting) {
     gatewayStarting = (async () => {
@@ -431,7 +465,10 @@ async function reconcileSeatSessionPinsV1() {
     try {
       const got = await call("sessions.get", { key });
       const row = parseJsonFromOutput(got.output);
-      if (!row) { report.push({ id, state: "no-session" }); continue; }
+      if (got.code !== 0 || !row) {
+        report.push({ id, state: "unknown", code: got.code, head: redactSecrets(String(got.output || "")).slice(0, 200) });
+        continue;
+      }
       const model = findKeyDeep(row, "modelOverride");
       const provider = findKeyDeep(row, "providerOverride");
       const thinking = findKeyDeep(row, "thinkingLevel");
@@ -545,17 +582,19 @@ async function probeGateway() {
 
 // Public health endpoint (no auth) so Railway can probe without /setup.
 // Deliberately expose only coarse health state; no paths, ports, errors, or config metadata.
+// B1: /healthz tells the truth. 200 only when the gateway is running and answering;
+// 503 (with a reason) when it is stopped, starting, unreachable or deliberately latched.
+// Railway's deploy healthcheck uses /setup/healthz (wrapper liveness) per railway.toml.
 app.get("/healthz", async (_req, res) => {
+  if (!isConfigured()) return res.status(503).json({ ok: false, state: "not-configured", gatewayReachable: false });
+  const latch = safety.latchInfo();
+  if (latch) return res.status(503).json({ ok: false, state: "stopped-by-owner", latch, gatewayReachable: false });
   let gatewayReachable = false;
-  if (isConfigured()) {
-    try {
-      gatewayReachable = await probeGateway();
-    } catch {
-      gatewayReachable = false;
-    }
+  try { gatewayReachable = await probeGateway(); } catch { gatewayReachable = false; }
+  if (!gatewayReachable) {
+    return res.status(503).json({ ok: false, state: gatewayStarting ? "starting" : "gateway-unreachable", gatewayReachable: false, lastGatewayExit });
   }
-
-  res.json({ ok: true, gatewayReachable });
+  return res.json({ ok: true, state: "running", gatewayReachable: true });
 });
 
 app.get("/setup/app.js", requireSetupAuth, (_req, res) => {
@@ -1210,6 +1249,12 @@ const ALLOWED_CONSOLE_COMMANDS = new Set([
   "gateway.restart",
   "gateway.stop",
   "gateway.start",
+  "latch.status",
+  "fuse.status",
+  "fuse.check",
+  "watchdog.status",
+  "alert.test",
+  "openclaw.gateway.call",
 
   // OpenClaw CLI helpers
   "openclaw.version",
@@ -1243,16 +1288,48 @@ app.post("/setup/api/console/run", requireSetupAuth, async (req, res) => {
       return res.json({ ok: true, output: "Gateway restarted (wrapper-managed).\n" });
     }
     if (cmd === "gateway.stop") {
-      if (gatewayProc) {
-        try { gatewayProc.kill("SIGTERM"); } catch {}
-        await sleep(750);
-        gatewayProc = null;
-      }
-      return res.json({ ok: true, output: "Gateway stopped (wrapper-managed).\n" });
+      // B5: a deliberate stop latches — watchdog, UI visits and container restarts will not revive it.
+      safety.setLatch("owner-console", "setup");
+      await stopGatewayProc({ hardAfterMs: 10_000 });
+      return res.json({ ok: true, output: "Gateway stopped and latched (stays stopped until gateway.start).\n" });
     }
     if (cmd === "gateway.start") {
+      safety.clearLatch("setup");
       const r = await ensureGatewayRunning();
-      return res.json({ ok: Boolean(r.ok), output: r.ok ? "Gateway started.\n" : `Gateway not started: ${r.reason}\n` });
+      return res.json({ ok: Boolean(r.ok), output: r.ok ? "Latch cleared. Gateway started.\n" : `Gateway not started: ${r.reason}\n` });
+    }
+    if (cmd === "latch.status") {
+      return res.json({ ok: true, output: JSON.stringify({ latch: safety.latchInfo(), gatewayRunning: Boolean(gatewayProc) }, null, 2) + "\n" });
+    }
+    if (cmd === "fuse.status") {
+      return res.json({ ok: true, output: JSON.stringify(safety.fuseStatus(), null, 2) + "\n" });
+    }
+    if (cmd === "fuse.check") {
+      const f = await safety.fuseTick({ stopGateway: () => stopGatewayProc({ hardAfterMs: 10_000 }) });
+      return res.json({ ok: true, output: JSON.stringify(f, null, 2) + "\n" });
+    }
+    if (cmd === "watchdog.status") {
+      return res.json({ ok: true, output: JSON.stringify({ failures: watchdogFailures, budget: safety.restartBudget(), alertTarget: safety.alertTarget() }, null, 2) + "\n" });
+    }
+    if (cmd === "alert.test") {
+      const r = await safety.sendAlert("test", arg || "TEST alert from the Salem AI safety net — no action needed.", { force: true });
+      return res.json({ ok: Boolean(r.ok), output: JSON.stringify(r) + "\n" });
+    }
+    if (cmd === "openclaw.gateway.call") {
+      // Narrow gateway RPC access for diagnostics. Reads only, plus clearing a session model pin.
+      let spec;
+      try { spec = JSON.parse(arg || "{}"); } catch { return res.status(400).json({ ok: false, error: "arg must be JSON {method, params}" }); }
+      const method = String(spec.method || "");
+      const params = spec.params && typeof spec.params === "object" ? spec.params : {};
+      const READ = new Set(["sessions.get", "sessions.list", "sessions.describe", "sessions.usage", "sessions.usage.logs", "sessions.usage.timeseries", "channels.status", "health", "status", "cron.list", "models.list", "tasks.list", "usage.cost"]);
+      const pinClear = method === "sessions.patch" && typeof params.key === "string"
+        && Object.keys(params).every((k) => ["key", "model", "thinkingLevel"].includes(k))
+        && (params.model === undefined || params.model === null)
+        && (params.thinkingLevel === undefined || params.thinkingLevel === null);
+      if (!READ.has(method) && !pinClear) return res.status(400).json({ ok: false, error: "method not allowed" });
+      const r = await runCmd(OPENCLAW_NODE, clawArgs(["gateway", "call", method, "--params", JSON.stringify(params), "--json", "--timeout", "30000"]), { timeoutMs: 45_000 });
+      const out = redactSecrets(r.output || "");
+      return res.status(r.code === 0 ? 200 : 500).json({ ok: r.code === 0, output: out.length > 60_000 ? out.slice(0, 60_000) + "\n...(truncated)" : out });
     }
 
     if (cmd === "openclaw.version") {
@@ -1986,6 +2063,10 @@ function applyJarvisOperationalDefaults() {
     cfg.agents.defaults.models ??= {};
     cfg.agents.defaults.subagents ??= {};
     cfg.agents.defaults.subagents.maxConcurrent = 4;
+    // B7: whole-run ceiling 90 min; each model request may run up to 20 min (Counsel at max
+    // thinking). Per-room wait budgets live in the room policy (Forum 8, Counsel 20, research 10/30).
+    cfg.agents.defaults.timeoutSeconds = 5400;
+    if (cfg.models?.providers?.openrouter) cfg.models.providers.openrouter.timeoutSeconds = 1200;
     cfg.agents.defaults.subagents.maxSpawnDepth = 1;
 
     // Permanent-team memory consolidation. One managed Memory Core sweep covers
@@ -2266,6 +2347,41 @@ function applyJarvisOperationalDefaults() {
   }
 }
 
+// B2 gateway watchdog: restart a crashed or frozen gateway (max 3 per hour), then escalate.
+async function gatewayWatchdogTick() {
+  if (watchdogBusy || !isConfigured() || gatewayStarting) return;
+  if (safety.isLatched()) { watchdogFailures = 0; return; }
+  if (Date.now() - WRAPPER_STARTED_AT < 3 * 60 * 1000) return; // boot grace (boot retry timer owns this window)
+  watchdogBusy = true;
+  try {
+    let reason = null;
+    if (!gatewayProc) {
+      reason = "had stopped unexpectedly";
+    } else if (await gatewayResponds(8_000)) {
+      watchdogFailures = 0;
+      return;
+    } else {
+      watchdogFailures += 1;
+      console.warn(`[watchdog-v1] gateway not responding (${watchdogFailures}/3)`);
+      if (watchdogFailures < 3) return;
+      reason = "was frozen for about 3 minutes";
+    }
+    const budget = safety.restartBudget();
+    if (budget.remaining <= 0) {
+      await safety.sendAlert("watchdog-escalation", `Jarvis ${reason} and has already been restarted 3 times in the last hour. Automatic restarts are paused — needs attention.`, { dedupeMs: 60 * 60 * 1000 });
+      return;
+    }
+    const n = safety.recordRestart();
+    console.warn(`[watchdog-v1] gateway ${reason} — restarting (${n}/3 this hour)`);
+    await stopGatewayProc({ hardAfterMs: 10_000 });
+    try { await ensureGatewayRunning(); } catch (err) { console.warn(`[watchdog-v1] restart failed: ${String(err)}`); }
+    watchdogFailures = 0;
+    await safety.sendAlert("watchdog-restart", `Jarvis ${reason} and was restarted automatically (${n}/3 this hour).`);
+  } finally {
+    watchdogBusy = false;
+  }
+}
+
 const server = app.listen(PORT, "0.0.0.0", async () => {
   console.log(`[wrapper] listening on :${PORT}`);
   console.log(`[wrapper] state dir: ${STATE_DIR}`);
@@ -2337,9 +2453,34 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
     }
   }
 
+  // B2: independent in-container watchdog for a hung wrapper (kills it so Railway restarts us).
+  try {
+    const wdPath = new URL("./wrapper-watchdog.js", import.meta.url).pathname;
+    const wd = childProcess.spawn(process.execPath, [wdPath], {
+      stdio: "inherit",
+      env: { ...process.env, WATCHDOG_WRAPPER_PID: String(process.pid), WATCHDOG_PORT: String(PORT) },
+    });
+    wd.on("exit", (code) => console.warn(`[wrapper-watchdog-v1] exited code=${code}`));
+  } catch (err) {
+    console.warn(`[wrapper-watchdog-v1] failed to start: ${String(err)}`);
+  }
+
+  // B2 gateway watchdog (every 60 s) and B3 money fuse (every 5 min; first check after 1 min).
+  setInterval(() => { void gatewayWatchdogTick(); }, 60_000).unref?.();
+  const fuseRun = () => safety.fuseTick({ stopGateway: () => stopGatewayProc({ hardAfterMs: 10_000 }) });
+  setTimeout(() => { void fuseRun(); }, 60_000).unref?.();
+  setInterval(() => { void fuseRun(); }, 5 * 60_000).unref?.();
+
+  // B5: a latched (deliberate) stop survives container restarts and redeploys.
+  const bootLatch = safety.latchInfo();
+  if (isConfigured() && bootLatch) {
+    console.log("[latch-v1] gateway NOT started at boot: " + JSON.stringify(bootLatch));
+    void safety.sendAlert("latched-boot", `Salem AI restarted, but Jarvis stays STOPPED (reason: ${bootLatch.reason}). Start it from /setup → gateway.start when ready.`, { dedupeMs: 6 * 60 * 60 * 1000 });
+  }
+
   // Auto-start the gateway if already configured so polling channels (Telegram/Discord/etc.)
   // work even if nobody visits the web UI.
-  if (isConfigured()) {
+  if (isConfigured() && !bootLatch) {
     console.log("[wrapper] config detected; starting gateway...");
     try {
       await ensureGatewayRunning();
