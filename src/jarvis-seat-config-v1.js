@@ -1,3 +1,18 @@
+import fs from "node:fs";
+import path from "node:path";
+
+// Seat configuration (v2, 2026-09-26).
+//
+// - Railway variables (JARVIS_*_MODEL / JARVIS_*_THINKING) are the operator's way to
+//   set a seat's model. They are applied ONLY when their value changed since the last
+//   boot that applied them. Model switches made by the owner at runtime
+//   (`/model <model> -a` in a seat chat, or `/config set agents.entries.<seat>.model=...`)
+//   therefore survive restarts instead of being silently reverted.
+// - No output-token ceilings: every agent uses its model's native output capacity
+//   (Salem's decision, 2026-09-26). Money is guarded by the prepaid balance and the
+//   money fuse, not by truncating answers.
+// - One-company-per-room is checked on every boot and reported (warn, never block).
+
 function uniq(values) {
   return Array.from(new Set((values || []).filter(Boolean)));
 }
@@ -26,7 +41,41 @@ function setSeat(cfg, id, { model, thinking }) {
   return true;
 }
 
-export function applyJarvisSeatConfigV1({ cfg }) {
+// Lab (company) behind a model reference, for the one-company-per-room rule.
+export function labOf(modelRef) {
+  const ref = String(modelRef || "").replace(/^openrouter\//, "");
+  const vendor = ref.split("/")[0] || "";
+  const map = {
+    "x-ai": "xAI", xai: "xAI", openai: "OpenAI", anthropic: "Anthropic", qwen: "Alibaba",
+    alibaba: "Alibaba", meta: "Meta", "meta-llama": "Meta", xiaomi: "Xiaomi",
+    deepseek: "DeepSeek", google: "Google", mistralai: "Mistral", moonshotai: "Moonshot",
+  };
+  return map[vendor] || vendor || "unknown";
+}
+
+export const SEAT_IDS = ["main", "forum-01", "forum-02", "forum-03", "counsel-01", "counsel-02", "counsel-03"];
+
+export function computeLineup(cfg, { counsel03Active = false } = {}) {
+  const entries = cfg?.agents?.entries ?? {};
+  const seat = (id) => entries[id]
+    ? { id, model: entries[id].model ?? null, thinking: entries[id].thinkingDefault ?? "provider-default", lab: labOf(entries[id].model) }
+    : null;
+  const forum = ["forum-01", "forum-02", "forum-03"].map(seat).filter(Boolean);
+  const counsel = ["counsel-01", "counsel-02", ...(counsel03Active ? ["counsel-03"] : [])].map(seat).filter(Boolean);
+  const jarvis = seat("main");
+  const research = ["research-01", "research-02"].map(seat).filter(Boolean);
+  const warnings = [];
+  // Forum: Jarvis chairs with its own view, so it counts toward the Forum's labs.
+  const forumLabs = [...forum.map((s) => s.lab), ...(jarvis ? [jarvis.lab] : [])];
+  const dupe = (labs) => labs.filter((l, i) => labs.indexOf(l) !== i);
+  for (const l of uniq(dupe(forumLabs))) warnings.push(`Forum has two ${l} models (including Jarvis as chair)`);
+  // Counsel: Jarvis is clerk-only (no view, no synthesis) when its lab already sits in Counsel.
+  for (const l of uniq(dupe(counsel.map((s) => s.lab)))) warnings.push(`Counsel has two ${l} models`);
+  const jarvisCounselRole = jarvis && counsel.some((s) => s.lab === jarvis.lab) ? "clerk-only" : "chair";
+  return { jarvis, forum, counsel, research, jarvisCounselRole, warnings };
+}
+
+export function applyJarvisSeatConfigV1({ cfg, stateDir, workspaceDir } = {}) {
   if (process.env.JARVIS_SEAT_CONFIG_V1?.trim() !== "1") {
     return { applied: false, reason: "disabled" };
   }
@@ -34,78 +83,75 @@ export function applyJarvisSeatConfigV1({ cfg }) {
     return { applied: false, reason: "missing-agent-config" };
   }
 
-  const assignments = {
-    main: {
-      model: process.env.JARVIS_MAIN_MODEL?.trim() || "openrouter/x-ai/grok-4.7",
-      thinking: process.env.JARVIS_MAIN_THINKING?.trim() || "high",
-    },
-    "forum-01": {
-      model: process.env.JARVIS_FORUM_01_MODEL?.trim() || "openrouter/qwen/qwen3.8-max-0902",
-      thinking: process.env.JARVIS_FORUM_01_THINKING?.trim() || "xhigh",
-    },
-    "forum-02": {
-      model: process.env.JARVIS_FORUM_02_MODEL?.trim() || "openrouter/meta/muse-spark-1.3",
-      thinking: process.env.JARVIS_FORUM_02_THINKING?.trim() || "xhigh",
-    },
-    "forum-03": {
-      model: process.env.JARVIS_FORUM_03_MODEL?.trim() || "openrouter/xiaomi/mimo-v2.6-pro",
-      thinking: process.env.JARVIS_FORUM_03_THINKING?.trim() || "provider-default",
-    },
-    "counsel-01": {
-      model: process.env.JARVIS_COUNSEL_01_MODEL?.trim() || "openrouter/anthropic/claude-opus-5.5",
-      thinking: process.env.JARVIS_COUNSEL_01_THINKING?.trim() || "max",
-    },
-    "counsel-02": {
-      model: process.env.JARVIS_COUNSEL_02_MODEL?.trim() || "openrouter/openai/gpt-6-astra",
-      thinking: process.env.JARVIS_COUNSEL_02_THINKING?.trim() || "max",
-    },
-  };
+  const envSeat = (id, modelVar, thinkingVar, model, thinking) => [id, {
+    model: process.env[modelVar]?.trim() || model,
+    thinking: process.env[thinkingVar]?.trim() || thinking,
+  }];
+  const assignments = Object.fromEntries([
+    envSeat("main", "JARVIS_MAIN_MODEL", "JARVIS_MAIN_THINKING", "openrouter/x-ai/grok-4.7", "high"),
+    envSeat("forum-01", "JARVIS_FORUM_01_MODEL", "JARVIS_FORUM_01_THINKING", "openrouter/qwen/qwen3.8-max-0902", "xhigh"),
+    envSeat("forum-02", "JARVIS_FORUM_02_MODEL", "JARVIS_FORUM_02_THINKING", "openrouter/meta/muse-spark-1.3", "xhigh"),
+    envSeat("forum-03", "JARVIS_FORUM_03_MODEL", "JARVIS_FORUM_03_THINKING", "openrouter/xiaomi/mimo-v2.6-pro", "provider-default"),
+    envSeat("counsel-01", "JARVIS_COUNSEL_01_MODEL", "JARVIS_COUNSEL_01_THINKING", "openrouter/anthropic/claude-opus-5.5", "max"),
+    envSeat("counsel-02", "JARVIS_COUNSEL_02_MODEL", "JARVIS_COUNSEL_02_THINKING", "openrouter/openai/gpt-6-astra", "max"),
+  ]);
 
-  for (const [id, spec] of Object.entries(assignments)) setSeat(cfg, id, spec);
-
-  // C2 output envelopes: 2x the largest observed 7-day output, with a 32k floor.
-  // The 2026-09-26 census put every active seat on the 32k floor; each current
-  // model's supported output ceiling is above this value.
-  const C2_OUTPUT_ENVELOPE_TOKENS = 32_000;
-  const c2EnvelopeAgents = [
-    "main",
-    "forum-01",
-    "forum-02",
-    "forum-03",
-    "counsel-01",
-    "counsel-02",
-    "research-01",
-    "research-02",
-  ];
-  for (const id of c2EnvelopeAgents) {
-    const entry = cfg.agents.entries?.[id];
-    if (!entry) continue;
-    entry.params ??= {};
-    entry.params.maxTokens = C2_OUTPUT_ENVELOPE_TOKENS;
+  // Apply a seat's Railway variables only when they changed since the last boot that
+  // applied them; otherwise keep whatever the owner has configured at runtime.
+  const snapshotPath = stateDir ? path.join(stateDir, "jarvis-seat-env-applied.json") : null;
+  let applied = {};
+  if (snapshotPath) {
+    try { applied = JSON.parse(fs.readFileSync(snapshotPath, "utf8")) || {}; } catch { applied = {}; }
+  }
+  const envApplied = [];
+  const keptRuntime = [];
+  for (const [id, spec] of Object.entries(assignments)) {
+    const sig = JSON.stringify(spec);
+    if (applied[id] === sig) { keptRuntime.push(id); continue; }
+    if (setSeat(cfg, id, spec)) {
+      applied[id] = sig;
+      envApplied.push(id);
+    }
+  }
+  if (snapshotPath) {
+    try { fs.writeFileSync(snapshotPath, JSON.stringify(applied, null, 2) + "\n", { encoding: "utf8", mode: 0o600 }); } catch {}
   }
 
-  // Keep the default primary aligned with Jarvis/main so any ordinary implicit
-  // main-agent run cannot silently fall back to a stale model assignment.
+  // No output ceilings anywhere (removes the 32k envelope GPT applied on 2026-09-26).
+  let capsRemoved = 0;
+  for (const entry of Object.values(cfg.agents.entries ?? {})) {
+    if (entry?.params && typeof entry.params === "object" && "maxTokens" in entry.params) {
+      delete entry.params.maxTokens;
+      capsRemoved += 1;
+      if (Object.keys(entry.params).length === 0) delete entry.params;
+    }
+  }
+  for (const modelCfg of Object.values(cfg.agents.defaults?.models ?? {})) {
+    if (modelCfg?.params && typeof modelCfg.params === "object" && "maxTokens" in modelCfg.params) {
+      delete modelCfg.params.maxTokens;
+      capsRemoved += 1;
+      if (Object.keys(modelCfg.params).length === 0) delete modelCfg.params;
+    }
+  }
+
+  // Keep the default primary aligned with Jarvis's configured model (runtime switches included).
+  const mainModel = cfg.agents.entries.main.model;
   cfg.agents.defaults.model ??= {};
   if (typeof cfg.agents.defaults.model === "string") {
-    cfg.agents.defaults.model = { primary: assignments.main.model };
+    cfg.agents.defaults.model = { primary: mainModel };
   } else {
-    cfg.agents.defaults.model.primary = assignments.main.model;
+    cfg.agents.defaults.model.primary = mainModel;
   }
 
-  // Forum 3 must use Xiaomi's own endpoint. Keep this as model-level routing so
-  // a future seat occupant does not inherit the pin.
-  const mimo = ensureModel(cfg, assignments["forum-03"].model);
-  mimo.params ??= {};
-  mimo.params.provider = {
-    order: ["xiaomi"],
-    only: ["xiaomi"],
-    allow_fallbacks: false,
-  };
+  // MiMo must use Xiaomi's own endpoint (model-level routing, so a future occupant
+  // of Forum 3 does not inherit the pin).
+  for (const [ref, modelCfg] of Object.entries(cfg.agents.defaults.models ?? {})) {
+    if (labOf(ref) !== "Xiaomi") continue;
+    modelCfg.params ??= {};
+    modelCfg.params.provider = { order: ["xiaomi"], only: ["xiaomi"], allow_fallbacks: false };
+  }
 
-  // Counsel 3 is a reserved but intentionally unfilled seat. OpenClaw has no
-  // generic per-agent "disabled" flag, so remove it from Jarvis's dispatch and
-  // agent-to-agent admission paths while preserving the stable workspace/ID.
+  // Counsel 3 is a reserved but intentionally unfilled seat.
   const counsel03Active = process.env.JARVIS_COUNSEL_03_ACTIVE?.trim() === "1";
   const main = cfg.agents.entries.main;
   main.subagents ??= {};
@@ -113,14 +159,12 @@ export function applyJarvisSeatConfigV1({ cfg }) {
   main.subagents.allowAgents = counsel03Active
     ? uniq([...allow, "counsel-03"])
     : allow.filter((id) => id !== "counsel-03");
-
   cfg.tools ??= {};
   cfg.tools.agentToAgent ??= {};
   const a2a = Array.isArray(cfg.tools.agentToAgent.allow) ? cfg.tools.agentToAgent.allow : [];
   cfg.tools.agentToAgent.allow = counsel03Active
     ? uniq([...a2a, "counsel-03"])
     : a2a.filter((id) => id !== "counsel-03");
-
   const c3 = cfg.agents.entries["counsel-03"];
   if (c3) {
     c3.identity ??= {};
@@ -130,16 +174,26 @@ export function applyJarvisSeatConfigV1({ cfg }) {
     }
   }
 
-  console.log("[seat-config-v1] reconciled " + JSON.stringify({
-    main: assignments.main,
-    forum01: assignments["forum-01"],
-    forum02: assignments["forum-02"],
-    forum03: { ...assignments["forum-03"], provider: "xiaomi-pinned" },
-    counsel01: assignments["counsel-01"],
-    counsel02: assignments["counsel-02"],
+  const lineup = computeLineup(cfg, { counsel03Active });
+  if (workspaceDir) {
+    try {
+      const dir = path.join(workspaceDir, "reports");
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(path.join(dir, "lineup.json"), JSON.stringify({ at: new Date().toISOString(), ...lineup }, null, 2) + "\n", { mode: 0o600 });
+    } catch {}
+  }
+  console.log("[seat-config-v2] reconciled " + JSON.stringify({
+    jarvis: lineup.jarvis,
+    forum: lineup.forum,
+    counsel: lineup.counsel,
+    jarvisCounselRole: lineup.jarvisCounselRole,
     counsel03Active,
-    c2OutputEnvelopeTokens: C2_OUTPUT_ENVELOPE_TOKENS,
+    envApplied,
+    keptRuntime,
+    outputCap: "none",
+    capsRemoved,
   }));
+  for (const w of lineup.warnings) console.warn("[seat-config-v2] ONE-LAB WARNING: " + w);
 
-  return { applied: true, assignments, counsel03Active };
+  return { applied: true, assignments, counsel03Active, lineup };
 }
