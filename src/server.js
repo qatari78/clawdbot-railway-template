@@ -14,7 +14,7 @@ import { applyJarvisAdviserMemoryV1 } from "./jarvis-adviser-memory.js";
 import { runJarvisAdviserMemoryCommissioningV1 } from "./jarvis-adviser-memory-commissioning.js";
 import { runJarvisSecurityAuditV1 } from "./jarvis-security-audit.js";
 import { runOpenRouterKeyAuditV1 } from "./openrouter-key-audit.js";
-import { applyJarvisResearchSystemV1 } from "./jarvis-research-system-v1.js";
+import { applyJarvisResearchSystemV1, researchPaths } from "./jarvis-research-system-v1.js";
 import { applyJarvisSeatConfigV1, modelRefOf } from "./jarvis-seat-config-v1.js";
 import { runJarvisResearchCommissioningV1 } from "./jarvis-research-commissioning.js";
 import { createSafety } from "./salem-safety.js";
@@ -1473,6 +1473,7 @@ const ALLOWED_CONSOLE_COMMANDS = new Set([
   "pins.reconcile",
   "disk.usage",
   "research.test",
+  "research.runs",
   "seat.set",
 
   // OpenClaw CLI helpers
@@ -1863,10 +1864,37 @@ app.post("/setup/api/console/run", requireSetupAuth, async (req, res) => {
       const parsed = parseJsonFromOutput(r.output);
       const sm = parsed?.summary;
       return res.json({ ok: r.code === 0, output: JSON.stringify(sm ? {
-        wallMs: Date.now() - t0, pass: sm.pass, failures: sm.failures, total_cost_usd: sm.total_cost_usd,
-        telemetry: (sm.telemetry || []).map((x) => ({ researcher: x.researcher, model: x.model, provider: x.provider, search_engine: x.search_engine, search_requests: x.search_requests, cost: x.usage?.cost })),
+        wallMs: Date.now() - t0, pass: sm.pass, failures: sm.failures, total_cost_usd: sm.total_cost_usd, failed_attempt_cost_usd: sm.failed_attempt_cost_usd ?? 0,
+        telemetry: (sm.telemetry || []).map((x) => ({ researcher: x.researcher, model: x.model, provider: x.provider, search_engine: x.search_engine, search_requests: x.search_requests, attempts: x.attempts ?? 1, cost: x.usage?.cost })),
         merge: sm.merge, verification: sm.verification, semantic_support: sm.semantic_support,
       } : { code: r.code, head: redactSecrets(String(r.output || "")).slice(0, 1500) }, null, 2) + "\n" });
+    }
+    if (cmd === "research.runs") {
+      // R12: the last research runs (numbers only — no brief text, no findings): pass, failures,
+      // cost per researcher, attempts, searches and tokens. arg = how many (default 10, max 30).
+      const n = Math.max(1, Math.min(30, Number.parseInt(arg || "10", 10) || 10));
+      const p = researchPaths();
+      let files = [];
+      try { files = fs.readdirSync(p.runs).filter((f) => f.endsWith(".json")).map((f) => ({ f, t: fs.statSync(path.join(p.runs, f)).mtimeMs })).sort((a, b) => b.t - a.t).slice(0, n); } catch {}
+      const runs = files.map(({ f }) => {
+        let s = null;
+        try { s = JSON.parse(fs.readFileSync(path.join(p.runs, f), "utf8")); } catch { return { file: f, unreadable: true }; }
+        const secs = (Date.parse(s.finished_at) - Date.parse(s.started_at)) / 1000;
+        return {
+          at: s.started_at, secs: Number.isFinite(secs) ? Math.round(secs) : null, level: s.level, gap: Boolean(s.ledger_brief_id),
+          pass: s.pass, failures: (s.failures || []).map((x) => String(x).slice(0, 240)),
+          cost: Math.round(Number(s.total_cost_usd || 0) * 1000) / 1000, failedAttemptCost: s.failed_attempt_cost_usd ?? null,
+          support: s.semantic_support ? { cost: s.semantic_support.cost_usd ?? null, model: s.semantic_support.model ?? null } : null,
+          researchers: (s.telemetry || []).map((x) => ({
+            who: x.researcher, model: x.model, provider: x.provider, attempts: x.attempts ?? 1,
+            searches: x.search_requests, tools: x.tool_calls_executed, cost: x.usage?.cost ?? null,
+            inTok: x.usage?.prompt_tokens ?? null, cachedTok: x.usage?.prompt_tokens_details?.cached_tokens ?? null, outTok: x.usage?.completion_tokens ?? null,
+          })),
+        };
+      });
+      let retries = 0;
+      try { retries = fs.readFileSync(p.events, "utf8").split("\n").slice(-4000).filter((l) => l.includes('"research-call-retry"')).length; } catch {}
+      return res.json({ ok: true, output: JSON.stringify({ runs, recentRetryEvents: retries }, null, 2) + "\n" });
     }
     if (cmd === "disk.usage") {
       const r = await runCmd("bash", ["-c", "df -h / /data 2>/dev/null; echo; du -xh -d 3 /data 2>/dev/null | sort -h | tail -45"], { timeoutMs: 180_000 });

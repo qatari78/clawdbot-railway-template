@@ -102,7 +102,21 @@ function toolBudget(level,researcher){
   if(level==="verifier") return 25;
   return researcher==="verifier"?25:30;
 }
-async function callResearch({apiKey,model,researcher,brief,searchEngine,level}){
+// Salem AI (Claude, 2026-09-26) — R12. A researcher call that fails for a transient reason (empty
+// or cut-off answer, provider error, HTTP 408/429/5xx, dropped connection) is retried once, for that
+// researcher only; the other researcher's paid work is kept. Observed 26 Sep: one dual run failed
+// with a bare "Unexpected end of JSON input" (an empty or cut-off answer), and the whole run —
+// including the researcher that had succeeded — was paid for again.
+export class ResearchCallError extends Error{
+  constructor(message,{retryable=false,cost=0}={}){super(message);this.name="ResearchCallError";this.retryable=retryable;this.cost=Number(cost)||0;}
+}
+function finishReasonOf(data){const c=data?.choices?.[0];return c?.finish_reason||c?.native_finish_reason||"unknown";}
+function callTimeoutMs(level){return level==="heavy"?20*60*1000:10*60*1000;}
+// All attempts of one researcher fit in this window; the rooms skill runs the runner with a 25-min
+// exec timeout, and the source and support checks run after the calls.
+const CALL_WINDOW_MS=22*60*1000;
+const RETRY_MIN_MS=5*60*1000;
+export async function callResearch({apiKey,model,researcher,brief,searchEngine,level,timeoutMs,fetchImpl=globalThis.fetch}){
   const requestBody={
     model:modelSlug(model),
     messages:[
@@ -133,11 +147,12 @@ async function callResearch({apiKey,model,researcher,brief,searchEngine,level}){
     // D6 privacy: only providers that do not collect data (JARVIS_PRIVACY_ROUTING=off to disable).
     ...(process.env.JARVIS_PRIVACY_ROUTING?.trim()==="off"?{}:{provider:{data_collection:"deny"}})
   };
+  const limitMs=Number(timeoutMs)>0?Number(timeoutMs):callTimeoutMs(level);
   const controller=new AbortController();
-  const timer=setTimeout(()=>controller.abort(),level==="heavy"?20*60*1000:10*60*1000);
-  let res;
+  const timer=setTimeout(()=>controller.abort(),limitMs);
+  let res,raw="";
   try{
-    res=await fetch("https://openrouter.ai/api/v1/chat/completions",{
+    res=await fetchImpl("https://openrouter.ai/api/v1/chat/completions",{
       method:"POST",
       headers:{
         Authorization:`Bearer ${apiKey}`,
@@ -148,20 +163,36 @@ async function callResearch({apiKey,model,researcher,brief,searchEngine,level}){
       body:JSON.stringify(requestBody),
       signal:controller.signal
     });
+    // Read the body inside the time limit too: OpenRouter can answer 200 at once and send the
+    // body only when the model has finished.
+    raw=await res.text();
+  }catch(err){
+    if(controller.signal.aborted)throw new ResearchCallError(`${researcher}: no complete answer within ${Math.round(limitMs/60000)} min`,{retryable:false});
+    throw new ResearchCallError(`${researcher}: connection to OpenRouter failed (${String(err?.message||err).slice(0,160)})`,{retryable:true});
   }finally{clearTimeout(timer);}
-  let data=null;try{data=await res.json();}catch{}
-  if(!res.ok)throw new Error(`${researcher} OpenRouter request failed: ${data?.error?.message||data?.message||("HTTP "+res.status)}`);
+  let data=null;try{data=JSON.parse(raw);}catch{}
+  const cost=Number(data?.usage?.cost||0);
+  if(!res.ok){
+    const status=Number(res.status);
+    throw new ResearchCallError(`${researcher} OpenRouter request failed: ${data?.error?.message||data?.message||("HTTP "+status)}`,{retryable:status===408||status===429||status>=500,cost});
+  }
+  if(!data||typeof data!=="object")throw new ResearchCallError(`${researcher}: OpenRouter's reply was cut off or not JSON (${raw.trim().length} bytes)`,{retryable:true});
+  if(data.error)throw new ResearchCallError(`${researcher}: provider error from OpenRouter: ${String(data.error?.message||data.error?.code||"unknown").slice(0,200)}`,{retryable:true,cost});
   const message=data?.choices?.[0]?.message;
-  const packet=extractPacket(assistantText(message));
-  if(packet.brief_id!==brief.brief_id)throw new Error(researcher+" returned wrong brief_id");
-  if(packet.researcher!==researcher)throw new Error(researcher+" returned wrong researcher role");
+  const text=assistantText(message);
+  if(!text.trim())throw new ResearchCallError(`${researcher}: the model returned an empty answer (finish_reason ${finishReasonOf(data)})`,{retryable:true,cost});
+  let packet;
+  try{packet=extractPacket(text);}
+  catch(err){throw new ResearchCallError(`${researcher}: the answer was not a valid research packet (${String(err?.message||err).slice(0,160)}; finish_reason ${finishReasonOf(data)})`,{retryable:true,cost});}
+  if(packet.brief_id!==brief.brief_id)throw new ResearchCallError(researcher+" returned wrong brief_id",{cost});
+  if(packet.researcher!==researcher)throw new ResearchCallError(researcher+" returned wrong researcher role",{cost});
   const d=data?.usage?.server_tool_use_details||data?.usage?.server_tool_use||{};
   const searchRequests=Number(d.web_search_requests||0);
   const toolCallsRequested=Number(d.tool_calls_requested||0);
   const toolCallsExecuted=Number(d.tool_calls_executed||0);
   const annotationCount=Array.isArray(message?.annotations)?message.annotations.length:0;
-  if(searchRequests<1&&annotationCount<1)throw new Error(researcher+" completed without observable web research");
-  if(!Array.isArray(packet.sources)||packet.sources.length<1)throw new Error(researcher+" returned no sources");
+  if(searchRequests<1&&annotationCount<1)throw new ResearchCallError(researcher+" completed without observable web research",{cost});
+  if(!Array.isArray(packet.sources)||packet.sources.length<1)throw new ResearchCallError(researcher+" returned no sources",{cost});
   return{
     packet,
     telemetry:{
@@ -170,6 +201,35 @@ async function callResearch({apiKey,model,researcher,brief,searchEngine,level}){
       annotation_count:annotationCount,usage:data?.usage??null
     }
   };
+}
+// One researcher: first attempt, then at most one retry for a transient failure, both within
+// CALL_WINDOW_MS. Resolves {packet, telemetry, attempts, failedCost}; rejects with an Error whose
+// message names both attempts and whose failedCost counts what the failed attempts were billed.
+export async function researchWithRetry(args,{now=Date.now,sleep=(ms)=>new Promise((r)=>setTimeout(r,ms)),onRetry=()=>{},call=callResearch}={}){
+  const start=now();
+  const limit=callTimeoutMs(args.level);
+  try{
+    const r=await call({...args,timeoutMs:limit});
+    return{...r,attempts:1,failedCost:0};
+  }catch(first){
+    const failedCost=Number(first?.cost||0);
+    const remaining=start+CALL_WINDOW_MS-now();
+    if(!first?.retryable||remaining<RETRY_MIN_MS){
+      const e=first instanceof Error?first:new Error(String(first));
+      e.failedCost=failedCost;
+      throw e;
+    }
+    try{onRetry(first);}catch{}
+    await sleep(5000);
+    try{
+      const r=await call({...args,timeoutMs:Math.min(limit,remaining-5000)});
+      return{...r,attempts:2,failedCost};
+    }catch(second){
+      const e=new Error(`${String(second?.message||second)} — on the retry, too (first attempt: ${String(first?.message||first).slice(0,200)})`);
+      e.failedCost=failedCost+Number(second?.cost||0);
+      throw e;
+    }
+  }
 }
 export async function runResearchBrief({brief,level="dual",ledgerBriefId=null}){
   if(!["verifier","scout","dual","heavy"].includes(level))throw new Error("level must be verifier, scout, dual, or heavy");
@@ -194,13 +254,17 @@ export async function runResearchBrief({brief,level="dual",ledgerBriefId=null}){
   const scoutSearchEngine=process.env.JARVIS_RESEARCH_SCOUT_SEARCH_ENGINE?.trim()||"perplexity";
 
   const jobs=[];
-  if(level!=="scout")jobs.push(callResearch({apiKey:auth.key,model:verifierModel,researcher:"verifier",brief:normalized,searchEngine:verifierSearchEngine,level}));
-  if(level!=="verifier")jobs.push(callResearch({apiKey:auth.key,model:scoutModel,researcher:"scout",brief:normalized,searchEngine:scoutSearchEngine,level}));
+  const onRetry=(researcher)=>(err)=>appendEvent("research-call-retry",{brief_id:normalized.brief_id,researcher,error:String(err?.message||err).slice(0,300)});
+  if(level!=="scout")jobs.push(researchWithRetry({apiKey:auth.key,model:verifierModel,researcher:"verifier",brief:normalized,searchEngine:verifierSearchEngine,level},{onRetry:onRetry("verifier")}));
+  if(level!=="verifier")jobs.push(researchWithRetry({apiKey:auth.key,model:scoutModel,researcher:"scout",brief:normalized,searchEngine:scoutSearchEngine,level},{onRetry:onRetry("scout")}));
   const settled=await Promise.allSettled(jobs);
   const failures=[],telemetry=[],packets=[];
+  let failedAttemptCost=0;
   for(const item of settled){
-    if(item.status==="rejected"){failures.push(String(item.reason?.message||item.reason));continue;}
+    if(item.status==="rejected"){failures.push(String(item.reason?.message||item.reason));failedAttemptCost+=Number(item.reason?.failedCost||0);continue;}
     const x=item.value;
+    failedAttemptCost+=Number(x.failedCost||0);
+    x.telemetry.attempts=x.attempts;
     if(ledgerBriefId&&ledgerBriefId!==normalized.brief_id){
       x.packet.research_task_id=normalized.brief_id;
       x.packet.parent_brief_id=ledgerBriefId;
@@ -213,20 +277,29 @@ export async function runResearchBrief({brief,level="dual",ledgerBriefId=null}){
   const pass=failures.length===0&&packets.length===jobs.length;
   const targetBriefId=ledgerBriefId||normalized.brief_id;
   let merge=null,verification=null,semanticVerification=null,dossier=null;
-  if(pass){
-    merge=mergeResearchBrief(targetBriefId);
-    verification=await verifyResearchSources(targetBriefId);
-    semanticVerification=await semanticSupportCheck(targetBriefId);
-    dossier=buildResearchDossier(targetBriefId);
+  // R12: when one researcher of a dual/heavy run failed even after its retry, the other's evidence
+  // still becomes a dossier (as a Verifier-only run would), marked partial — not thrown away.
+  if(pass||packets.length>0){
+    try{
+      merge=mergeResearchBrief(targetBriefId);
+      verification=await verifyResearchSources(targetBriefId);
+      semanticVerification=await semanticSupportCheck(targetBriefId);
+      dossier=buildResearchDossier(targetBriefId);
+    }catch(err){
+      if(pass)throw err;
+      failures.push("the partial dossier could not be built: "+String(err?.message||err).slice(0,200));
+      merge=verification=semanticVerification=dossier=null;
+    }
   }
-  const researchCost=telemetry.reduce((s,x)=>s+Number(x.usage?.cost||0),0);
+  const partial=!pass&&Boolean(dossier);
+  const researchCost=telemetry.reduce((s,x)=>s+Number(x.usage?.cost||0),0)+failedAttemptCost;
   const supportCost=Number(semanticVerification?.usage?.cost||0);
   const totalCost=researchCost+supportCost;
   const summary={
     schema:"jarvis-research-run-v1.1",run_id:runId,brief_id:targetBriefId,task_brief_id:normalized.brief_id,level,
     ledger_brief_id:ledgerBriefId||null,
-    started_at:normalized.commissioned_at,finished_at:new Date().toISOString(),pass,failures,
-    packets,telemetry,total_cost_usd:totalCost,
+    started_at:normalized.commissioned_at,finished_at:new Date().toISOString(),pass,partial,failures,
+    packets,telemetry,total_cost_usd:totalCost,failed_attempt_cost_usd:failedAttemptCost,
     merge:merge?{merge_id:merge.merge_id,source_count:merge.source_count,claim_count:merge.claim_count,contradiction_count:merge.contradiction_count}:null,
     verification:verification?{verification_id:verification.verification_id,reachable_sources:verification.reachable_sources,unreachable_sources:verification.unreachable_sources,numeric_mismatches:verification.numeric_mismatches,source_failures:verification.source_failures}:null,
     semantic_support:semanticVerification?{semantic_verification_id:semanticVerification.semantic_verification_id,...semanticVerification.summary,model:semanticVerification.model,cost_usd:Number(semanticVerification.usage?.cost||0)}:null,
@@ -234,7 +307,7 @@ export async function runResearchBrief({brief,level="dual",ledgerBriefId=null}){
   };
   const runPath=path.join(p.runs,runId+".json");
   fs.writeFileSync(runPath,JSON.stringify(summary,null,2)+"\n",{encoding:"utf8",mode:0o600});
-  appendEvent("research-run-completed",{run_id:runId,brief_id:targetBriefId,task_brief_id:normalized.brief_id,level,pass,total_cost_usd:totalCost});
+  appendEvent("research-run-completed",{run_id:runId,brief_id:targetBriefId,task_brief_id:normalized.brief_id,level,pass,partial,total_cost_usd:totalCost});
   return{summary,dossier};
 }
 async function cli(){
